@@ -1,4 +1,5 @@
 import Foundation
+import NIOCore
 
 /// One live connection to a database server. Implementations hold exactly one underlying
 /// connection so that session state (transactions, `SET`, temp tables) behaves like a terminal client.
@@ -30,21 +31,53 @@ protocol DatabaseDriver: AnyObject, Sendable {
     /// Best-effort cancellation of the statement currently running on this connection.
     func cancelCurrentQuery() async
 
+    /// Whether the connection is inside a transaction (opened by the user's own BEGIN), or nil when the
+    /// driver can't tell. Table commits refuse to start inside one, since their BEGIN/COMMIT would end it.
+    var isInTransaction: Bool? { get async }
+
     /// Closes the connection. Safe to call more than once.
     func close() async
+}
+
+extension DatabaseDriver {
+    var isInTransaction: Bool? { get async { nil } }
+}
+
+/// How a driver reaches its server when that isn't a plain TCP dial to host:port, i.e. through an SSH tunnel.
+struct DriverTransport: Sendable {
+    /// Called right before every TCP dial to host:port, including side connections (cancel, reconnect).
+    /// A tunnel uses it to let exactly that connection through its local listener.
+    var willDial: @Sendable () -> Void = {}
+    /// Opens a byte channel already connected to the server, used instead of dialing host:port by drivers
+    /// that can run over one (Postgres). Nothing else on the Mac can reach such a channel.
+    var openChannel: (@Sendable () async throws -> any Channel)?
+
+    static let direct = DriverTransport()
+
+    static func through(_ tunnel: SSHTunnel) -> DriverTransport {
+        DriverTransport(
+            willDial: { [weak tunnel] in tunnel?.allowNextLocalConnection() },
+            openChannel: { [weak tunnel] in
+                guard let tunnel else { throw DatabaseError("The SSH tunnel is closed.") }
+                return try await tunnel.openForwardedChannel()
+            }
+        )
+    }
 }
 
 enum DriverFactory {
     /// Opens a driver. `host`/`port` are where to actually dial (127.0.0.1:<local> when tunnelled);
     /// `config.host` is the logical server name, used for TLS hostname verification.
-    static func connect(config: ConnectionConfig, host: String, port: Int) async throws -> any DatabaseDriver {
+    static func connect(config: ConnectionConfig, host: String, port: Int,
+                        transport: DriverTransport = .direct) async throws -> any DatabaseDriver {
         switch config.kind {
         case .postgres:
-            return try await PostgresDriver.connect(config: config, host: host, port: port)
+            return try await PostgresDriver.connect(config: config, host: host, port: port, transport: transport)
         case .mysql:
-            return try await MySQLDriver.connect(config: config, host: host, port: port)
+            return try await MySQLDriver.connect(config: config, host: host, port: port, transport: transport)
         case .sqlite:
-            return try SQLiteDriver.open(path: config.filePath)
+            // Opens off the main actor so a slow or network volume can't stall the UI.
+            return try await SQLiteDriver.connect(path: config.filePath)
         }
     }
 }

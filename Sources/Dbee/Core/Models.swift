@@ -262,6 +262,9 @@ struct QueryResult: Sendable, Identifiable {
     var duration: TimeInterval
     /// True when the driver stopped reading because `maxRows` was reached.
     var truncated: Bool = false
+    /// Rows an UPDATE matched, when the driver reports it separately from `rowsAffected` (MySQL counts
+    /// only rows it actually changed). nil when unknown or the same as `rowsAffected`.
+    var rowsMatched: Int? = nil
 
     var isRowSet: Bool { !columns.isEmpty }
 
@@ -299,4 +302,18 @@ struct DatabaseError: LocalizedError, Sendable {
 struct GridSort: Equatable, Sendable {
     var column: String
     var ascending: Bool
+    /// Position of the sorted column among the result's columns, so a result with two columns of the same
+    /// name (a join) sorts by the one that was clicked. nil when only the name is known; SQL sorts use the name.
+    var columnIndex: Int? = nil
+
+    /// Whether this sort is on the column `name` at `index`.
+    func isOn(_ name: String, at index: Int) -> Bool {
+        columnIndex.map { $0 == index } ?? (column == name)
+    }
+
+    /// The column to sort `columns` by: `columnIndex` when it still names that column, else the first match.
+    func index(in columns: [String]) -> Int? {
+        if let columnIndex, columnIndex < columns.count, columns[columnIndex] == column { return columnIndex }
+        return columns.firstIndex(of: column)
+    }
 }
