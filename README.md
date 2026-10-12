@@ -1,6 +1,7 @@
 # Dbee
 
-Dbee is a small, native macOS database client for PostgreSQL, MySQL/MariaDB and SQLite. It is built
+Dbee is a small, native macOS database client for PostgreSQL, MySQL/MariaDB, SQLite, Redis and
+MongoDB. It is built
 for working with databases on remote servers, usually over an SSH tunnel, and it does not store your
 credentials in readable form anywhere. The one opt-in exception, Remember with Touch ID, keeps a
 login encrypted by the Mac's Secure Enclave.
@@ -10,14 +11,32 @@ system appearance (including Dark Mode).
 
 ## Features
 
-- **Databases:** PostgreSQL, MySQL and MariaDB, and local SQLite files.
+- **Databases:** PostgreSQL, MySQL and MariaDB, local SQLite files, Redis (and Valkey), and MongoDB 3.6
+  or later.
 - **Connections:** TLS modes Off, Preferred, Required (any certificate) and Verify Certificate.
   With Required or Verify Certificate, Dbee refuses a server that doesn't offer TLS before sending
   any login data. Verify Certificate needs the server's host name, not an IP address, for MySQL and
   for connections through an SSH tunnel.
   SSH tunnels with password or private key authentication, including passphrase-protected OpenSSH
   keys (Ed25519, RSA, ECDSA). You can paste a connection URL such as
-  `postgres://db.example.com:5432/app?sslmode=require` into the host field.
+  `postgres://db.example.com:5432/app?sslmode=require`, `rediss://cache.example.com:6380/2` or
+  `mongodb://db.example.com/app?tls=true` into the host field. Dbee connects to the one server you
+  enter: a MongoDB URL listing several hosts uses the first, and `mongodb+srv://` isn't supported.
+- **Redis:** each database (`db0`, `db1`…) shows its keys as one table with their type, TTL, size and
+  value (the first 100 elements of a hash, list, set or sorted set, as JSON), filtered with a `SCAN`
+  pattern. The query editor runs one command per line, written as in `redis-cli`. Commands that stream
+  without end (`SUBSCRIBE`, `MONITOR`) aren't run. Keys are read-only in the table browser; change
+  them with commands.
+- **MongoDB:** the sidebar lists collections and views; the table browser pages through documents with
+  one column per top-level field and filters with a query document such as `{ age: { $gt: 30 } }`. The
+  structure view shows the fields seen in a sample of documents, the indexes, and the collection's
+  options. The query editor takes mongosh-style statements: `db.users.find({…}).sort({…}).limit(10)`,
+  `aggregate`, `countDocuments`, `distinct`, `insertOne/Many`, `updateOne/Many`, `replaceOne`,
+  `deleteOne/Many`, `findOneAnd…`, index and collection commands, `show dbs`, `show collections`,
+  `use <db>`, and any server command as `db.runCommand({…})` or a bare `{…}` document. Values use the
+  shell's syntax, including `ObjectId("…")`, `ISODate("…")`, `NumberLong`, `NumberDecimal` and
+  `/regex/`. Documents are read-only in the table browser. Logins use SCRAM-SHA-256 or SCRAM-SHA-1,
+  against the database you enter and then `admin`.
 - **Schema sidebar** with a filter field. Switch databases on the server from the toolbar.
 - **Table browser:** paging, sorting, a filter builder, inline cell editing, adding and deleting
   rows. Edits are collected first; you can preview the generated SQL and commit everything in one
@@ -52,7 +71,9 @@ Credentials live in memory only for as long as the connection is open, so Dbee c
 switch databases without asking again. They are wiped when you disconnect, close the window or quit.
 A PostgreSQL connection doesn't need the password after signing in (stopping a query uses the
 protocol's cancel key), so the driver drops it right away. MySQL keeps it in memory to reconnect and
-to stop a running query from a second session. If a MySQL connection had to reconnect, Dbee tells you
+to stop a running query from a second session. Redis and MongoDB keep it to log in again after a
+stopped command (Stop closes their connection, since neither protocol can interrupt a command on the
+same connection) or a dropped connection. If a MySQL connection had to reconnect, Dbee tells you
 when session settings such as autocommit, user variables, temporary tables or locks were lost,
 instead of running the next statement without them.
 Disconnecting also discards query results and history; query tabs keep only their SQL text.
@@ -182,8 +203,12 @@ docker run -d --name dbee-it-mysql -e MYSQL_ROOT_PASSWORD=dbee_test -e MYSQL_DAT
   -p 127.0.0.1:53306:3306 mysql:8.4
 docker run -d --name dbee-it-mariadb -e MARIADB_ROOT_PASSWORD=dbee_test -e MARIADB_DATABASE=dbee \
   -p 127.0.0.1:53307:3306 mariadb:11
+docker run -d --name dbee-it-redis -p 127.0.0.1:56379:6379 redis:7 redis-server --requirepass dbee_test
+docker run -d --name dbee-it-mongo -e MONGO_INITDB_ROOT_USERNAME=dbee -e MONGO_INITDB_ROOT_PASSWORD=dbee_test \
+  -p 127.0.0.1:57017:27017 mongo:7
 
-DBEE_PG_PORT=55432 DBEE_MYSQL_PORT=53306 DBEE_MARIADB_PORT=53307 swift test
+DBEE_PG_PORT=55432 DBEE_MYSQL_PORT=53306 DBEE_MARIADB_PORT=53307 DBEE_REDIS_PORT=56379 \
+  DBEE_MONGO_PORT=57017 swift test
 ```
 
 | Variable | Enables |
@@ -191,6 +216,8 @@ DBEE_PG_PORT=55432 DBEE_MYSQL_PORT=53306 DBEE_MARIADB_PORT=53307 swift test
 | `DBEE_PG_PORT` | PostgreSQL driver tests (user `postgres`, password `dbee_test`) |
 | `DBEE_MYSQL_PORT` | MySQL driver tests (user `root`, password `dbee_test`, database `dbee`) |
 | `DBEE_MARIADB_PORT` | The same tests against MariaDB |
+| `DBEE_REDIS_PORT` | Redis driver tests (password `dbee_test`; they empty database 14 and 15) |
+| `DBEE_MONGO_PORT` | MongoDB driver tests (user `dbee`, password `dbee_test`; they drop `dbee_it`) |
 | `DBEE_SSH_PORT` | SSH tunnel tests against an OpenSSH server |
 | `DBEE_TB_PG_PORT`, `DBEE_TB_MYSQL_PORT` | Table browser editing tests; also need `DBEE_TB_USER`, `DBEE_TB_PASSWORD` and `DBEE_TB_DATABASE`, valid on both servers |
 | `DBEE_E2E_PG_HOST`, `DBEE_E2E_MYSQL_HOST`, `DBEE_E2E_MARIADB_HOST` | End-to-end tests that reach each database through the SSH tunnel (with `DBEE_SSH_PORT`) |
@@ -214,5 +241,5 @@ DBEE_SSH_PORT=52222 DBEE_E2E_PG_HOST=pg DBEE_E2E_MYSQL_HOST=mysql DBEE_E2E_MARIA
 Remove the containers when you're done:
 
 ```sh
-docker rm -f dbee-it-postgres dbee-it-mysql dbee-it-mariadb
+docker rm -f dbee-it-postgres dbee-it-mysql dbee-it-mariadb dbee-it-redis dbee-it-mongo
 ```

@@ -130,7 +130,7 @@ struct TableBrowserView: View {
                     onSort: { sort in navigate { await model.setSort(sort) } },
                     onEdit: { cell, value in model.setValue(value, at: cell) },
                     onDeleteRows: { rows in model.deleteRows(rows) },
-                    insertTarget: (dialect: model.dialect, table: model.table),
+                    insertTarget: model.dialect.kind.isSQL ? (dialect: model.dialect, table: model.table) : nil,
                     onShowInspector: { showInspector = true },
                     numericColumns: numericColumns,
                     dataGeneration: pageGeneration,
@@ -448,7 +448,8 @@ private struct InspectedRowID: Hashable {
 
 // MARK: - Filter bar
 
-/// Finder/Mail-style filter bar: column, operator and value, or a raw SQL WHERE expression.
+/// Finder/Mail-style filter bar: column, operator and value, or a raw SQL WHERE expression (a query document
+/// for MongoDB). Redis keys are filtered with a SCAN pattern only.
 private struct TableBrowserFilterBar: View {
     @Bindable var model: TableBrowserModel
     var apply: (String?) -> Void
@@ -462,11 +463,11 @@ private struct TableBrowserFilterBar: View {
                 .help(model.filter.isEmpty ? "No filter applied" : "Filtered: \(model.filter)")
                 .accessibilityLabel(model.filter.isEmpty ? "No filter applied" : "Filter applied")
 
-            if model.filterDraft.isRaw {
-                Text("WHERE")
+            if isRawMode {
+                Text(rawLabel)
                     .font(.system(.callout, design: .monospaced))
                     .foregroundStyle(.secondary)
-                TextField("Expression", text: $model.filterDraft.rawText, prompt: Text("id > 10 AND name LIKE 'A%'"))
+                TextField("Expression", text: $model.filterDraft.rawText, prompt: Text(rawPrompt))
                     .font(.system(.callout, design: .monospaced))
                     .textFieldStyle(.roundedBorder)
                     .labelsHidden()
@@ -501,12 +502,15 @@ private struct TableBrowserFilterBar: View {
                 }
             }
 
-            Toggle(isOn: rawModeBinding) {
-                Label("SQL", systemImage: "chevron.left.forwardslash.chevron.right")
-                    .labelStyle(.iconOnly)
+            if kind != .redis {
+                Toggle(isOn: rawModeBinding) {
+                    Label(kind == .mongodb ? "Query Document" : "SQL", systemImage: "chevron.left.forwardslash.chevron.right")
+                        .labelStyle(.iconOnly)
+                }
+                .toggleStyle(.button)
+                .help(model.filterDraft.isRaw ? "Use the column filter"
+                      : kind == .mongodb ? "Write the filter as a query document" : "Write the WHERE clause in SQL")
             }
-            .toggleStyle(.button)
-            .help(model.filterDraft.isRaw ? "Use the column filter" : "Write the WHERE clause in SQL")
 
             Button("Apply", action: applyDraft)
                 .disabled(!canApply)
@@ -519,6 +523,27 @@ private struct TableBrowserFilterBar: View {
         .background(.bar)
     }
 
+    private var kind: DatabaseKind { model.dialect.kind }
+
+    /// Redis only has the pattern field.
+    private var isRawMode: Bool { model.filterDraft.isRaw || kind == .redis }
+
+    private var rawLabel: String {
+        switch kind {
+        case .redis: "MATCH"
+        case .mongodb: "find"
+        default: "WHERE"
+        }
+    }
+
+    private var rawPrompt: String {
+        switch kind {
+        case .redis: "user:*"
+        case .mongodb: "{ status: \"active\", age: { $gt: 30 } }"
+        default: "id > 10 AND name LIKE 'A%'"
+        }
+    }
+
     private var valuePrompt: String {
         switch model.filterDraft.op {
         case .like, .notLike: "%text%"
@@ -528,7 +553,7 @@ private struct TableBrowserFilterBar: View {
     }
 
     private var canApply: Bool {
-        if model.filterDraft.isRaw { return true }
+        if isRawMode { return true }
         return model.filterExpression(for: model.filterDraft) != nil
     }
 
@@ -550,7 +575,7 @@ private struct TableBrowserFilterBar: View {
     private func applyDraft() {
         guard canApply else { return }
         let draft = model.filterDraft
-        let expression = draft.isRaw ? draft.rawText : model.filterExpression(for: draft)
+        let expression = isRawMode ? draft.rawText : model.filterExpression(for: draft)
         apply(expression)
     }
 

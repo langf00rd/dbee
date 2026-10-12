@@ -64,7 +64,7 @@ import Testing
         #expect(my.quoteIdentifier("x`\u{301}") == "`x``\u{301}`")
     }
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func identifierNULBecomesReplacementCharacter(kind: DatabaseKind) {
         let quoted = SQLDialect(kind: kind).quoteIdentifier("a\0b")
         #expect(!quoted.unicodeScalars.contains("\0"))
@@ -81,7 +81,7 @@ import Testing
 
     // MARK: Literals
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func nullAndPlainLiterals(kind: DatabaseKind) {
         let d = SQLDialect(kind: kind)
         #expect(d.literal(nil) == "NULL")
@@ -121,13 +121,13 @@ import Testing
         #expect(lite.literal("\0") == "('' || char(0) || '')")
         #expect(lite.literal("x'\0") == "('x''' || char(0) || '')")
         #expect(pg.literal("a\0b") == "('a' || chr(0) || 'b')")
-        for kind in DatabaseKind.allCases {
+        for kind in DatabaseKind.sqlKinds {
             #expect(!SQLDialect(kind: kind).literal("\0\0x\0").unicodeScalars.contains("\0"))
         }
     }
 
     /// Every literal must lex as exactly one string token, whatever it contains.
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func literalsNeverBreakOut(kind: DatabaseKind) {
         let d = SQLDialect(kind: kind)
         let nasty = ["'", "\\", "\\'", "'\\", "';--", "\\'; DROP TABLE t; --", "$$", "$a$;", "/*", "*/;",
@@ -199,7 +199,7 @@ import Testing
         #expect(lite.delete(plain, key: [("a", nil), ("b", "x")]) == "DELETE FROM \"users\" WHERE \"a\" IS NULL AND \"b\" = 'x'")
     }
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func emptyKeyNeverMatchesRows(kind: DatabaseKind) {
         let d = SQLDialect(kind: kind)
         #expect(d.delete(plain, key: []) == "DELETE FROM \(d.qualifiedName(plain)) WHERE 1 = 0")

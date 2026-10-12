@@ -176,22 +176,33 @@ struct SidebarView: View {
     @ViewBuilder private func tableMenu(_ table: TableInfo) -> some View {
         Button("Open") { session.selection = .table(table.ref) }
         Button("Open in New Query") {
-            session.newQueryTab(sql: "SELECT * FROM \(session.dialect.qualifiedName(table.ref)) LIMIT 100;")
+            session.newQueryTab(sql: Self.browseStatement(for: table.ref, dialect: session.dialect))
         }
         Divider()
         Button("Copy Name") { copyToPasteboard(table.ref.name) }
         Button("Copy Qualified Name") { copyToPasteboard(session.dialect.qualifiedName(table.ref)) }
         Divider()
-        if table.kind == .table {
-            Button(session.settings.confirmDestructiveActions ? "Truncate Table…" : "Truncate Table", role: .destructive) {
+        if let title = SidebarTableAction.truncate(table).truncateMenuTitle {
+            Button(session.settings.confirmDestructiveActions ? title + "…" : title, role: .destructive) {
                 request(.truncate(table))
             }
             .disabled(!session.isConnected)
         }
-        Button(SidebarTableAction.drop(table).menuTitle, role: .destructive) {
-            request(.drop(table))
+        if table.kind != .keys {
+            Button(SidebarTableAction.drop(table).menuTitle, role: .destructive) {
+                request(.drop(table))
+            }
+            .disabled(!session.isConnected)
         }
-        .disabled(!session.isConnected)
+    }
+
+    /// The first rows of `table`, in the query editor's language.
+    static func browseStatement(for table: TableRef, dialect: SQLDialect) -> String {
+        switch dialect.kind {
+        case .mongodb: "\(dialect.qualifiedName(table)).find({}).limit(100)"
+        case .redis: "SCAN 0 COUNT 100"
+        default: "SELECT * FROM \(dialect.qualifiedName(table)) LIMIT 100;"
+        }
     }
 
     /// Truncate honours the "confirm destructive actions" setting; dropping is always confirmed.
@@ -308,16 +319,37 @@ enum SidebarTableAction: Identifiable {
         case .table: "table"
         case .view: "view"
         case .materializedView: "materialized view"
+        case .collection: "collection"
+        case .keys: "keys"
+        }
+    }
+
+    /// The menu title for emptying the table, or nil when it can't be emptied (views).
+    var truncateMenuTitle: String? {
+        switch table.kind {
+        case .table: "Truncate Table"
+        case .collection: "Delete All Documents"
+        case .keys: "Delete All Keys"
+        case .view, .materializedView: nil
         }
     }
 
     var menuTitle: String {
-        table.kind == .table ? "Drop Table…" : "Drop View…"
+        switch table.kind {
+        case .table: "Drop Table…"
+        case .collection: "Drop Collection…"
+        default: "Drop View…"
+        }
     }
 
     var confirmationTitle: String {
         switch self {
-        case .truncate(let table): "Truncate table “\(table.ref.name)”?"
+        case .truncate(let table):
+            switch table.kind {
+            case .collection: "Delete every document in “\(table.ref.name)”?"
+            case .keys: "Delete every key in this database?"
+            default: "Truncate table “\(table.ref.name)”?"
+            }
         case .drop(let table): "Drop \(noun) “\(table.ref.name)”?"
         }
     }
@@ -325,10 +357,14 @@ enum SidebarTableAction: Identifiable {
     var confirmationMessage: String {
         switch self {
         case .truncate(let table):
-            return "Every row in “\(table.ref.id)” will be permanently deleted. This can’t be undone."
+            if table.kind == .keys {
+                return "FLUSHDB permanently deletes every key in the current Redis database. This can’t be undone."
+            }
+            let rows = table.kind == .collection ? "document" : "row"
+            return "Every \(rows) in “\(table.ref.id)” will be permanently deleted. This can’t be undone."
         case .drop(let table):
             switch table.kind {
-            case .table:
+            case .table, .collection, .keys:
                 return "“\(table.ref.id)” and all of its data will be permanently deleted. This can’t be undone."
             case .view:
                 return "The view “\(table.ref.id)” will be deleted. The data it reads from isn’t affected."
@@ -340,14 +376,19 @@ enum SidebarTableAction: Identifiable {
 
     var confirmButtonTitle: String {
         switch self {
-        case .truncate: "Truncate"
-        case .drop: table.kind == .table ? "Drop Table" : "Drop View"
+        case .truncate: table.kind == .table ? "Truncate" : "Delete"
+        case .drop:
+            switch table.kind {
+            case .table: "Drop Table"
+            case .collection: "Drop Collection"
+            default: "Drop View"
+            }
         }
     }
 
     var failureTitle: String {
         switch self {
-        case .truncate(let table): "Couldn’t Truncate “\(table.ref.name)”"
+        case .truncate(let table): table.kind == .table ? "Couldn’t Truncate “\(table.ref.name)”" : "Couldn’t Delete the Contents of “\(table.ref.name)”"
         case .drop(let table): "Couldn’t Drop “\(table.ref.name)”"
         }
     }
@@ -426,6 +467,8 @@ private struct SidebarTableRow: View {
         case .table: "Table"
         case .view: "View"
         case .materializedView: "Materialized view"
+        case .collection: "Collection"
+        case .keys: "Keys"
         }
     }
 }

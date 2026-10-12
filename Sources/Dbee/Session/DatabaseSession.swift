@@ -295,6 +295,19 @@ final class DatabaseSession {
             }
         case .postgres:
             await switchPostgresDatabase(name, config: config)
+        case .redis, .mongodb:
+            do {
+                try await withLease { driver in
+                    guard let driver = driver as? any CommandDriver else { return }
+                    try await driver.useDatabase(name)
+                }
+                currentDatabase = (try? await withLease { try await $0.currentDatabase() }) ?? name
+                self.config?.database = currentDatabase
+                databaseDidChange()
+                await refreshSchema()
+            } catch {
+                schemaError = Self.describe(error)
+            }
         case .sqlite:
             break
         }
@@ -351,8 +364,8 @@ final class DatabaseSession {
         selection = selection.flatMap { if case .query = $0 { $0 } else { nil } }
     }
 
-    /// Re-reads the MySQL connection's default database after a statement that may have changed it
-    /// (`USE`, `DROP DATABASE`), so the sidebar, picker and table browser follow the server.
+    /// Re-reads the connection's current database after a statement that may have changed it (MySQL `USE`
+    /// and `DROP DATABASE`, Redis `SELECT`, MongoDB `use`), so the sidebar, picker and table browser follow.
     private func syncCurrentDatabase() async {
         guard let name = try? await withLease({ try await $0.currentDatabase() }), name != currentDatabase else { return }
         currentDatabase = name
@@ -393,6 +406,22 @@ final class DatabaseSession {
 
     func structure(of table: TableRef) async throws -> TableStructure {
         try await withLease { try await $0.tableStructure(table) }
+    }
+
+    /// One page of a Redis or MongoDB table, read by the driver (see `CommandDriver`).
+    func page(of table: TableRef, filter: String?, sort: GridSort?, limit: Int, offset: Int) async throws -> QueryResult {
+        try await withLease { driver in
+            guard let driver = driver as? any CommandDriver else { throw DatabaseError("This connection can't page tables itself.") }
+            return try await driver.page(of: table, filter: filter, sort: sort, limit: limit, offset: offset)
+        }
+    }
+
+    /// Rows a Redis or MongoDB table filter matches, or nil when the driver can't count them.
+    func rowCount(of table: TableRef, filter: String?) async throws -> Int? {
+        try await withLease { driver in
+            guard let driver = driver as? any CommandDriver else { return nil }
+            return try await driver.count(of: table, filter: filter)
+        }
     }
 
     func browserModel(for table: TableRef) -> TableBrowserModel {
@@ -503,9 +532,9 @@ final class DatabaseSession {
             do {
                 let result = try await execute(statement.text, maxRows: nil, recordHistory: true, owner: tab.id)
                 results.append(result)
-                if Self.isSchemaChanging(statement.text) { schemaMayHaveChanged = true }
+                if Self.isSchemaChanging(statement.text, kind: kind) { schemaMayHaveChanged = true }
                 trackTransaction(statement.text)
-                if kind == .mysql, Self.mayChangeMySQLDatabase(statement.text) { await syncCurrentDatabase() }
+                if Self.mayChangeDatabase(statement.text, kind: kind) { await syncCurrentDatabase() }
             } catch {
                 tab.errorMessage = error is CancellationError || Task.isCancelled ? "Query stopped" : Self.describe(error)
                 tab.failedStatementRange = NSRange(location: statement.range.location + baseOffset, length: statement.range.length)
@@ -545,6 +574,7 @@ final class DatabaseSession {
 
     /// Keeps `userTransactionOpen` in step with transaction statements the user runs.
     private func trackTransaction(_ sql: String) {
+        guard kind.isSQL else { return }
         if let opens = Self.transactionEffect(sql, kind: kind) {
             userTransactionOpen = opens
         } else if kind == .mysql, Self.isSchemaChanging(sql) {
@@ -600,10 +630,38 @@ final class DatabaseSession {
 
     // MARK: Helpers
 
-    /// Statements after which the sidebar and table browsers should be refreshed.
-    static func isSchemaChanging(_ sql: String) -> Bool {
-        let head = sql.drop(while: { $0.isWhitespace }).prefix(10).uppercased()
-        return ["CREATE", "DROP", "ALTER", "RENAME", "TRUNCATE", "COMMENT", "ATTACH", "DETACH"].contains { head.hasPrefix($0) }
+    /// Statements after which the sidebar and table browsers should be refreshed: DDL, and for Redis and
+    /// MongoDB the commands that create, drop or empty collections, indexes and databases.
+    static func isSchemaChanging(_ sql: String, kind: DatabaseKind = .postgres) -> Bool {
+        switch kind {
+        case .redis:
+            let head = sql.split(whereSeparator: \.isWhitespace).first?.uppercased() ?? ""
+            return ["FLUSHDB", "FLUSHALL", "SWAPDB"].contains(head)
+        case .mongodb:
+            let text = sql.replacingOccurrences(of: " ", with: "")
+            let changes = [".drop(", ".insertOne(", ".insertMany(", ".insert(", ".createIndex(", ".dropIndex(",
+                           ".renameCollection(", "db.createCollection(", "db.createView(", "db.dropDatabase(",
+                           "{create:", "{drop:", "{\"create\":", "{\"drop\":", "db.runCommand("]
+            return changes.contains { text.contains($0) }
+        default:
+            let head = sql.drop(while: { $0.isWhitespace }).prefix(10).uppercased()
+            return ["CREATE", "DROP", "ALTER", "RENAME", "TRUNCATE", "COMMENT", "ATTACH", "DETACH"].contains { head.hasPrefix($0) }
+        }
+    }
+
+    /// Statements that can change the connection's current database.
+    static func mayChangeDatabase(_ sql: String, kind: DatabaseKind) -> Bool {
+        let words = sql.split(whereSeparator: \.isWhitespace).prefix(2).map { $0.uppercased() }
+        switch kind {
+        case .mysql:
+            return mayChangeMySQLDatabase(sql)
+        case .redis:
+            return words.first == "SELECT"
+        case .mongodb:
+            return words.first == "USE" || sql.contains("dropDatabase")
+        case .postgres, .sqlite:
+            return false
+        }
     }
 
     /// MySQL statements that can change the connection's default database.

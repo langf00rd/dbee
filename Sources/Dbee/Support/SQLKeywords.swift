@@ -90,6 +90,8 @@ enum SQLKeywords {
         case .postgres: postgresAll
         case .mysql: mysqlAll
         case .sqlite: sqliteAll
+        case .redis: redisCommands
+        case .mongodb: mongoWords
         }
     }
 
@@ -99,8 +101,72 @@ enum SQLKeywords {
         case .postgres: postgresCompletion
         case .mysql: mysqlCompletion
         case .sqlite: sqliteCompletion
+        case .redis: redisCompletion
+        case .mongodb: mongoCompletion
         }
     }
+
+    /// Redis command names (first words of commands, and the common subcommands and options).
+    static let redisCommands: Set<String> = [
+        "APPEND", "AUTH", "BITCOUNT", "BITFIELD", "BITOP", "BITPOS", "BLMOVE", "BLMPOP", "BLPOP", "BRPOP",
+        "BZMPOP", "BZPOPMAX", "BZPOPMIN", "CLIENT", "CLUSTER", "COMMAND", "CONFIG", "COPY", "DBSIZE", "DECR",
+        "DECRBY", "DEL", "DISCARD", "DUMP", "ECHO", "EVAL", "EVALSHA", "EXEC", "EXISTS", "EXPIRE", "EXPIREAT",
+        "EXPIRETIME", "FCALL", "FLUSHALL", "FLUSHDB", "FUNCTION", "GEOADD", "GEODIST", "GEOHASH", "GEOPOS",
+        "GEOSEARCH", "GET", "GETBIT", "GETDEL", "GETEX", "GETRANGE", "GETSET", "HDEL", "HEXISTS", "HGET",
+        "HGETALL", "HINCRBY", "HINCRBYFLOAT", "HKEYS", "HLEN", "HMGET", "HMSET", "HRANDFIELD", "HSCAN", "HSET",
+        "HSETNX", "HSTRLEN", "HVALS", "INCR", "INCRBY", "INCRBYFLOAT", "INFO", "KEYS", "LASTSAVE", "LCS",
+        "LINDEX", "LINSERT", "LLEN", "LMOVE", "LMPOP", "LPOP", "LPOS", "LPUSH", "LPUSHX", "LRANGE", "LREM",
+        "LSET", "LTRIM", "MEMORY", "MGET", "MOVE", "MSET", "MSETNX", "MULTI", "OBJECT", "PERSIST", "PEXPIRE",
+        "PEXPIREAT", "PEXPIRETIME", "PFADD", "PFCOUNT", "PFMERGE", "PING", "PSETEX", "PTTL", "PUBLISH",
+        "PUBSUB", "RANDOMKEY", "RENAME", "RENAMENX", "RESTORE", "ROLE", "RPOP", "RPOPLPUSH", "RPUSH", "RPUSHX",
+        "SADD", "SAVE", "SCAN", "SCARD", "SCRIPT", "SDIFF", "SDIFFSTORE", "SELECT", "SET", "SETBIT", "SETEX",
+        "SETNX", "SETRANGE", "SINTER", "SINTERCARD", "SINTERSTORE", "SISMEMBER", "SLOWLOG", "SMEMBERS",
+        "SMISMEMBER", "SMOVE", "SORT", "SPOP", "SRANDMEMBER", "SREM", "SSCAN", "STRLEN", "SUNION",
+        "SUNIONSTORE", "SWAPDB", "TIME", "TOUCH", "TTL", "TYPE", "UNLINK", "UNWATCH", "WAIT", "WATCH", "XACK",
+        "XADD", "XAUTOCLAIM", "XCLAIM", "XDEL", "XGROUP", "XINFO", "XLEN", "XPENDING", "XRANGE", "XREAD",
+        "XREADGROUP", "XREVRANGE", "XTRIM", "ZADD", "ZCARD", "ZCOUNT", "ZDIFF", "ZINCRBY", "ZINTER",
+        "ZINTERCARD", "ZLEXCOUNT", "ZMPOP", "ZMSCORE", "ZPOPMAX", "ZPOPMIN", "ZRANDMEMBER", "ZRANGE",
+        "ZRANGEBYLEX", "ZRANGEBYSCORE", "ZRANGESTORE", "ZRANK", "ZREM", "ZREMRANGEBYLEX", "ZREMRANGEBYRANK",
+        "ZREMRANGEBYSCORE", "ZREVRANGE", "ZREVRANGEBYSCORE", "ZREVRANK", "ZSCAN", "ZSCORE", "ZUNION",
+        "ZUNIONSTORE", "JSON.GET", "JSON.SET", "JSON.DEL", "FT.SEARCH", "FT.INFO",
+        "MATCH", "COUNT", "WITHSCORES", "WITHVALUES", "LIMIT", "EX", "PX", "NX", "XX", "KEEPTTL", "LIST",
+    ]
+
+    /// mongosh words: shell commands, db and collection methods, cursor methods and constructors.
+    static let mongoWords: Set<String> = [
+        "DB", "SHOW", "USE", "DBS", "COLLECTIONS",
+        "FIND", "FINDONE", "AGGREGATE", "COUNTDOCUMENTS", "ESTIMATEDDOCUMENTCOUNT", "DISTINCT",
+        "INSERTONE", "INSERTMANY", "UPDATEONE", "UPDATEMANY", "REPLACEONE", "DELETEONE", "DELETEMANY",
+        "FINDONEANDUPDATE", "FINDONEANDREPLACE", "FINDONEANDDELETE", "DROP", "RENAMECOLLECTION",
+        "GETINDEXES", "CREATEINDEX", "DROPINDEX", "STATS", "GETCOLLECTION", "RUNCOMMAND", "ADMINCOMMAND",
+        "GETCOLLECTIONNAMES", "GETCOLLECTIONINFOS", "CREATECOLLECTION", "CREATEVIEW", "DROPDATABASE",
+        "SERVERSTATUS", "VERSION", "GETNAME", "CURRENTOP", "KILLOP", "HOSTINFO",
+        "SORT", "LIMIT", "SKIP", "PROJECTION", "HINT", "MAXTIMEMS", "COLLATION", "COMMENT", "COUNT",
+        "EXPLAIN", "TOARRAY", "PRETTY",
+        "OBJECTID", "ISODATE", "DATE", "NUMBERLONG", "NUMBERINT", "NUMBERDECIMAL", "TIMESTAMP", "BINDATA",
+        "UUID", "MINKEY", "MAXKEY", "TRUE", "FALSE", "NULL", "NEW",
+    ]
+
+    /// Spellings used for completion, since mongosh names are case-sensitive.
+    private static let mongoCompletion: [String] = [
+        "db", "show", "use", "dbs", "collections",
+        "find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct",
+        "insertOne", "insertMany", "updateOne", "updateMany", "replaceOne", "deleteOne", "deleteMany",
+        "findOneAndUpdate", "findOneAndReplace", "findOneAndDelete", "drop", "renameCollection",
+        "getIndexes", "createIndex", "dropIndex", "stats", "getCollection", "runCommand", "adminCommand",
+        "getCollectionNames", "getCollectionInfos", "createCollection", "createView", "dropDatabase",
+        "serverStatus", "version", "getName", "currentOp", "killOp", "hostInfo",
+        "sort", "limit", "skip", "projection", "hint", "maxTimeMS", "collation", "comment", "count", "explain",
+        "ObjectId", "ISODate", "NumberLong", "NumberInt", "NumberDecimal", "Timestamp", "BinData", "UUID",
+        "MinKey", "MaxKey", "true", "false", "null",
+        "$match", "$group", "$project", "$sort", "$limit", "$skip", "$unwind", "$lookup", "$addFields", "$set",
+        "$unset", "$count", "$facet", "$replaceRoot", "$sample", "$out", "$merge",
+        "$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$and", "$or", "$not", "$nor", "$exists",
+        "$type", "$regex", "$elemMatch", "$size", "$all", "$expr", "$text", "$inc", "$push", "$pull",
+        "$addToSet", "$pop", "$rename", "$sum", "$avg", "$min", "$max", "$first", "$last",
+    ].sorted { $0.lowercased() < $1.lowercased() }
+
+    private static let redisCompletion = redisCommands.sorted()
 
     private static let postgresAll = common.union(postgres)
     private static let mysqlAll = common.union(mysql)
@@ -133,7 +199,8 @@ enum SQLCompletion {
         objects.sort { $0.localizedStandardCompare($1) == .orderedAscending }
         var keywords: [String] = []
         for word in SQLKeywords.completionWords(for: kind) where word.lowercased().hasPrefix(lowerPrefix) {
-            let shown = wantsLowercase ? word.lowercased() : word
+            // mongosh names are case-sensitive, so they keep their own spelling.
+            let shown = wantsLowercase && kind != .mongodb ? word.lowercased() : word
             if shown != prefix, seen.insert(word.lowercased()).inserted { keywords.append(shown) }
         }
         return Array((objects + keywords).prefix(limit))

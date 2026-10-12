@@ -150,7 +150,7 @@ struct ConnectView: View {
                         Text(kind.displayName).tag(kind)
                     }
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 TextField("Name", text: $config.name, prompt: Text("Optional"))
                     .focused($focus, equals: .name)
             }
@@ -214,7 +214,7 @@ struct ConnectView: View {
             .focused($focus, equals: .host)
             PortField("Port", port: $config.port, defaultPort: config.kind.defaultPort)
                 .focused($focus, equals: .port)
-            TextField("Database", text: $config.database, prompt: Text("Optional"))
+            TextField("Database", text: $config.database, prompt: Text(config.kind == .redis ? "0" : "Optional"))
                 .focused($focus, equals: .database)
         } header: {
             Text("Server")
@@ -229,7 +229,7 @@ struct ConnectView: View {
 
     private var authenticationSection: some View {
         Section {
-            TextField("User", text: $config.username, prompt: Text("Required"))
+            TextField("User", text: $config.username, prompt: Text(config.kind.requiresUsername ? "Required" : "Optional"))
                 .focused($focus, equals: .user)
             SecureField("Password", text: $config.password)
                 .focused($focus, equals: .password)
@@ -470,7 +470,7 @@ struct ConnectView: View {
         guard Self.invalidURLField(in: prepared) == nil else { return false }
         let hasTarget = switch prepared.kind {
         case .sqlite: !prepared.filePath.isEmpty
-        case .postgres, .mysql: !prepared.host.isEmpty || (prepared.ssh.enabled && !prepared.ssh.host.isEmpty)
+        case .postgres, .mysql, .redis, .mongodb: !prepared.host.isEmpty || (prepared.ssh.enabled && !prepared.ssh.host.isEmpty)
         }
         guard hasTarget else { return false }
         guard let stored = selectedFavorite else { return true }
@@ -512,11 +512,18 @@ struct ConnectView: View {
         Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })
     }
 
-    /// Switching the engine also switches the port, unless the user typed a custom one.
+    /// Switching the engine also switches the port, unless the user typed a custom one. Redis and MongoDB
+    /// servers rarely offer TLS unless set up for it, so their default is Off rather than Preferred (a plain
+    /// MongoDB server doesn't answer a TLS attempt, which would stall every connect).
     private var kindBinding: Binding<DatabaseKind> {
         Binding(get: { config.kind }, set: { kind in
             guard kind != config.kind else { return }
             if config.port == config.kind.defaultPort { config.port = kind.defaultPort }
+            if !kind.isSQL, config.kind.isSQL, config.tls == .preferred {
+                config.tls = .disabled
+            } else if kind.isSQL, !config.kind.isSQL, config.tls == .disabled {
+                config.tls = .preferred
+            }
             config.kind = kind
             localError = nil
         })
@@ -887,11 +894,11 @@ extension ConnectView {
         switch c.kind {
         case .sqlite:
             return c.filePath.isEmpty ? .filePath : nil
-        case .postgres, .mysql:
+        case .postgres, .mysql, .redis, .mongodb:
             if let field = invalidURLField(in: c) { return field }
             if !c.ssh.enabled, c.host.isEmpty { return .host }
             if !validPort.contains(c.port) { return .port }
-            if c.username.isEmpty { return .user }
+            if c.username.isEmpty, c.kind.requiresUsername { return .user }
             guard c.ssh.enabled else { return nil }
             if c.ssh.host.isEmpty { return .sshHost }
             if !validPort.contains(c.ssh.port) { return .sshPort }
@@ -917,7 +924,7 @@ extension ConnectView {
         switch field {
         case .database: "Enter only the database name here. Paste connection URLs into the Host field."
         case .sshHost: "Enter the SSH server’s host name, not a URL."
-        default: "Dbee reads postgres://, mysql:// and sqlite:// URLs. For other URLs, enter the host name instead."
+        default: "Dbee reads postgres://, mysql://, sqlite://, redis:// and mongodb:// URLs. For other URLs, enter the host name instead."
         }
     }
 
@@ -956,7 +963,7 @@ extension ConnectView {
         switch c.kind {
         case .sqlite:
             return c.filePath.isEmpty ? "SQLite Database" : URL(fileURLWithPath: c.filePath).lastPathComponent
-        case .postgres, .mysql:
+        case .postgres, .mysql, .redis, .mongodb:
             let server = !c.host.isEmpty ? c.host : (c.ssh.enabled && !c.ssh.host.isEmpty ? c.ssh.host : "")
             switch (c.database.isEmpty, server.isEmpty) {
             case (true, true): return c.kind.displayName
@@ -1034,7 +1041,7 @@ private struct FavoriteRow: View {
         switch favorite.kind {
         case .sqlite:
             return (favorite.filePath as NSString).abbreviatingWithTildeInPath
-        case .postgres, .mysql:
+        case .postgres, .mysql, .redis, .mongodb:
             let host = favorite.host.isEmpty ? "127.0.0.1" : favorite.host
             let address = host.contains(":") ? "[\(host)]:\(favorite.port)" : "\(host):\(favorite.port)"
             return favorite.sshEnabled ? "\(address) via SSH" : address

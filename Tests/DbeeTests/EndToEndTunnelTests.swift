@@ -8,8 +8,10 @@ import Testing
 //   docker network connect --alias pg      dbee-it-net dbee-it-postgres
 //   docker network connect --alias mysql   dbee-it-net dbee-it-mysql
 //   docker network connect --alias mariadb dbee-it-net dbee-it-mariadb
+//   docker network connect --alias redis   dbee-it-net dbee-it-redis
+//   docker network connect --alias mongo   dbee-it-net dbee-it-mongo
 //   DBEE_SSH_PORT=52222 DBEE_E2E_PG_HOST=pg DBEE_E2E_MYSQL_HOST=mysql DBEE_E2E_MARIADB_HOST=mariadb \
-//     swift test --filter EndToEnd
+//     DBEE_E2E_REDIS_HOST=redis DBEE_E2E_MONGO_HOST=mongo swift test --filter EndToEnd
 //
 // The aliases resolve only inside the docker network, so a successful query proves the traffic went
 // through the tunnel. Passwords default to the ones the dbee-it-* containers were created with.
@@ -43,6 +45,13 @@ private enum E2E {
     }
     static let mariadb = env["DBEE_E2E_MARIADB_HOST"].map {
         Target(name: "MariaDB", kind: .mysql, host: $0, port: 3306, user: "root", database: "dbee", schema: "dbee")
+    }
+
+    static let redis = env["DBEE_E2E_REDIS_HOST"].map {
+        Target(name: "Redis", kind: .redis, host: $0, port: 6379, user: "", database: "13", schema: "db13")
+    }
+    static let mongo = env["DBEE_E2E_MONGO_HOST"].map {
+        Target(name: "MongoDB", kind: .mongodb, host: $0, port: 27017, user: "dbee", database: "dbee_e2e", schema: "dbee_e2e")
     }
 
     static var isEnabled: Bool { sshPort != nil }
@@ -160,6 +169,72 @@ struct EndToEndTunnelTests {
     }
 
     // MARK: Session level
+
+    /// Redis and MongoDB through the whole app path: the session opens the tunnel, the driver runs over the
+    /// tunnel's own SSH channel, the sidebar lists the keys or collections, a query tab runs commands and
+    /// the table browser pages and filters.
+    @MainActor
+    @Test(arguments: [E2E.redis, E2E.mongo].compactMap { $0 })
+    fileprivate func commandEngineSessionThroughTunnel(_ target: E2E.Target) async throws {
+        let session = DatabaseSession()
+        session.hostKeyVerifier = AcceptingHostKeyVerifier()
+        session.connect(E2E.config(for: target))
+        try await waitUntilConnected(session)
+        #expect(session.kind == target.kind)
+        #expect(session.subtitle.contains("via SSH"))
+        #expect(session.currentDatabase == target.schema)
+
+        let tab = try #require(session.queryTabs.first)
+        let table: TableRef
+        if target.kind == .redis {
+            await session.run("FLUSHDB\nSET e2e:a 1\nSET e2e:b 2\nSET other 3\nGET e2e:b", in: tab)
+            #expect(tab.errorMessage == nil)
+            #expect(tab.results.last?.rows == [["2"]])
+            table = RedisDriver.keysTable
+        } else {
+            await session.run("""
+                db.dropDatabase()
+                db.probe.insertMany([{ n: 1, label: "through ssh" }, { n: 2 }, { n: 3 }])
+                db.probe.find({ n: { $gte: 2 } }).sort({ n: 1 })
+                """, in: tab)
+            #expect(tab.errorMessage == nil)
+            #expect(tab.results.last?.rows.map { $0[1] } == ["2", "3"])
+            table = TableRef(schema: nil, name: "probe")
+        }
+        #expect(session.allTables.contains { $0.ref == table })
+
+        let model = session.browserModel(for: table)
+        await model.load()
+        #expect(model.errorMessage == nil)
+        #expect(model.rows.count == 3)
+        #expect(model.readOnlyReason != nil)
+        await model.setFilter(target.kind == .redis ? "e2e:*" : "{ n: { $lt: 3 } }")
+        #expect(model.rows.count == 2)
+        try await waitUntil { model.totalCount == 2 }
+
+        // Switching databases goes through the driver and refreshes the sidebar.
+        let other = target.kind == .redis ? "db12" : "dbee_e2e_other"
+        await session.switchDatabase(other)
+        #expect(session.currentDatabase == other)
+        #expect(session.config?.database == other)
+        #expect(session.browserModels[table] == nil, "the old database's browser state is dropped")
+        if target.kind == .mongodb { #expect(!session.allTables.contains { $0.ref == table }) }
+
+        await session.disconnect()
+        #expect(session.phase == .idle)
+    }
+
+    @MainActor
+    private func waitUntil(timeout: Duration = .seconds(10), _ condition: @MainActor () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition() {
+            guard ContinuousClock.now < deadline else {
+                Issue.record("Timed out waiting for a condition")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
 
     /// The whole app path: DatabaseSession opens the tunnel, connects, loads the schema and runs a script.
     @MainActor

@@ -23,6 +23,20 @@ struct StructureView: View {
             case .ddl: "DDL"
             }
         }
+
+        /// Sections the engine has: MongoDB has no foreign keys and shows createCollection instead of DDL;
+        /// Redis keys only have their fixed columns.
+        static func available(for kind: DatabaseKind) -> [Section] {
+            switch kind {
+            case .redis: [.columns]
+            case .mongodb: [.columns, .indexes, .ddl]
+            case .postgres, .mysql, .sqlite: allCases
+            }
+        }
+
+        func title(for kind: DatabaseKind) -> String {
+            self == .ddl && kind == .mongodb ? "Definition" : title
+        }
     }
 
     var body: some View {
@@ -39,8 +53,8 @@ struct StructureView: View {
         HStack {
             Spacer()
             Picker("Section", selection: $section) {
-                ForEach(Section.allCases) { section in
-                    Text(section.title).tag(section)
+                ForEach(Section.available(for: session.kind)) { section in
+                    Text(section.title(for: session.kind)).tag(section)
                 }
             }
             .pickerStyle(.segmented)
@@ -54,9 +68,9 @@ struct StructureView: View {
                     Button {
                         TableBrowserPasteboard.copy(ddl)
                     } label: {
-                        Label("Copy DDL", systemImage: "doc.on.doc")
+                        Label("Copy \(section.title(for: session.kind))", systemImage: "doc.on.doc")
                     }
-                    .help("Copy DDL")
+                    .help("Copy \(section.title(for: session.kind))")
                 }
                 Button {
                     Task { await load(force: true) }

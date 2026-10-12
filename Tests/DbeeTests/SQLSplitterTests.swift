@@ -27,7 +27,7 @@ import Testing
 
     // MARK: Basics
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func emptyAndBlankInput(kind: DatabaseKind) {
         #expect(texts("", kind).isEmpty)
         #expect(texts("   \n\t\r\n  ", kind).isEmpty)
@@ -35,7 +35,7 @@ import Testing
         #expect(texts(" ; ;\n;; ", kind).isEmpty)
     }
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func commentOnlyInput(kind: DatabaseKind) {
         #expect(texts("-- just a comment", kind).isEmpty)
         #expect(texts("-- one;\n-- two;\n", kind).isEmpty)
@@ -44,7 +44,7 @@ import Testing
         #expect(texts("SELECT 1; -- trailing; comment", kind) == ["SELECT 1"])
     }
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func splitsOnTopLevelSemicolons(kind: DatabaseKind) {
         #expect(texts("SELECT 1; SELECT 2;", kind) == ["SELECT 1", "SELECT 2"])
         #expect(texts("SELECT 1;SELECT 2", kind) == ["SELECT 1", "SELECT 2"])
@@ -53,13 +53,13 @@ import Testing
         #expect(texts("\n\n  UPDATE t\n  SET a = 1\n  WHERE b = 2  ;\n\n", kind) == ["UPDATE t\n  SET a = 1\n  WHERE b = 2"])
     }
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func trimsSurroundingCommentsButKeepsInnerOnes(kind: DatabaseKind) {
         let script = "-- leading\n/* block */ SELECT /* ; */ 1 -- inner;\n FROM t -- trailing\n;\nSELECT 2 /* tail */"
         #expect(texts(script, kind) == ["SELECT /* ; */ 1 -- inner;\n FROM t", "SELECT 2"])
     }
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func handlesCRLFAndTrailingWhitespace(kind: DatabaseKind) {
         #expect(texts("-- c\r\nSELECT 1;\r\nSELECT 2   \r\n\t", kind) == ["SELECT 1", "SELECT 2"])
         let statements = SQLSplitter.split("SELECT 1   \n\t", kind: kind)
@@ -68,20 +68,20 @@ import Testing
 
     // MARK: Strings and identifiers
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func semicolonsInsideQuotes(kind: DatabaseKind) {
         #expect(texts("SELECT ';'; SELECT 2", kind) == ["SELECT ';'", "SELECT 2"])
         #expect(texts("SELECT 'it''s; fine'; SELECT 2", kind) == ["SELECT 'it''s; fine'", "SELECT 2"])
         #expect(texts("SELECT \"a;b\" FROM \"x\"\"y;\"; SELECT 2", kind) == ["SELECT \"a;b\" FROM \"x\"\"y;\"", "SELECT 2"])
     }
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func commentMarkersInsideQuotes(kind: DatabaseKind) {
         let script = "SELECT '--;', '/* ;', \"-- x;\"; SELECT '*/;'"
         #expect(texts(script, kind) == ["SELECT '--;', '/* ;', \"-- x;\"", "SELECT '*/;'"])
     }
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func quotesInsideComments(kind: DatabaseKind) {
         let script = "-- it's a 'comment;\nSELECT 1; /* don't \" ` ; */ SELECT 2; -- '\nSELECT 3"
         #expect(texts(script, kind) == ["SELECT 1", "SELECT 2", "SELECT 3"])
@@ -119,7 +119,7 @@ import Testing
         #expect(texts("SELECT a[1]; SELECT 2", .postgres) == ["SELECT a[1]", "SELECT 2"])
     }
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func unterminatedTokensRunToEnd(kind: DatabaseKind) {
         #expect(texts("SELECT 1; SELECT 'abc; SELECT 2", kind) == ["SELECT 1", "SELECT 'abc; SELECT 2"])
         #expect(texts("SELECT \"abc; SELECT 2", kind) == ["SELECT \"abc; SELECT 2"])
@@ -203,7 +203,7 @@ import Testing
         #expect(texts(procedure + ";SELECT 3", .postgres) == [procedure, "SELECT 3"])
     }
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func transactionBeginIsNotABlock(kind: DatabaseKind) {
         #expect(texts("BEGIN; INSERT INTO t VALUES (1); END; COMMIT;", kind)
             == ["BEGIN", "INSERT INTO t VALUES (1)", "END", "COMMIT"])
@@ -289,7 +289,7 @@ import Testing
 
     // MARK: Unicode ranges
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func utf16RangesWithEmojiAndMultibyteText(kind: DatabaseKind) {
         let script = "-- 💥 é\nSELECT '😀;' AS \"🎉\";\n\t/* 世界 */ SELECT 'e\u{301}', 👩‍👩‍👧 ;  SELECT 3"
         let statements = SQLSplitter.split(script, kind: kind)
@@ -385,7 +385,7 @@ import Testing
         #expect(elapsed < .seconds(5))
     }
 
-    @Test(arguments: DatabaseKind.allCases)
+    @Test(arguments: DatabaseKind.sqlKinds)
     func randomScriptsKeepRangeInvariants(kind: DatabaseKind) {
         let fragments = [
             "SELECT 1", ";", " ", "\n", "'a;b'", "'it''s'", "\"q;\"", "`b;`", "-- c;\n", "# h;\n", "/* x; */",

@@ -251,9 +251,15 @@ final class TableBrowserModel {
 
         let limit = pageSize
         let offset = page * limit
-        let sql = dialect.selectPage(table, filter: filter.isEmpty ? nil : filter, sort: sort, limit: limit, offset: offset)
+        let currentFilter = filter.isEmpty ? nil : filter
         do {
-            let result = try await connectedSession().execute(sql, maxRows: limit, recordHistory: false)
+            let result: QueryResult
+            if dialect.kind.isSQL {
+                let sql = dialect.selectPage(table, filter: currentFilter, sort: sort, limit: limit, offset: offset)
+                result = try await connectedSession().execute(sql, maxRows: limit, recordHistory: false)
+            } else {
+                result = try await connectedSession().page(of: table, filter: currentFilter, sort: sort, limit: limit, offset: offset)
+            }
             guard current == generation else { return }
             // Some drivers report no columns for an empty result; the structure still knows them.
             columns = result.columns.isEmpty ? (structure?.columns.map(\.name) ?? []) : result.columns
@@ -287,14 +293,23 @@ final class TableBrowserModel {
     private func startCount() {
         invalidateCount()
         let current = countGeneration
-        let sql = dialect.count(table, filter: filter.isEmpty ? nil : filter)
+        let currentFilter = filter.isEmpty ? nil : filter
+        let sql = dialect.count(table, filter: currentFilter)
+        let isSQL = dialect.kind.isSQL
+        let table = table
         isCounting = true
         countTask = Task { [weak self] in
             guard let self else { return }
-            let result = try? await connectedSession().execute(sql, maxRows: 1, recordHistory: false)
+            let count: Int?
+            if isSQL {
+                let result = try? await connectedSession().execute(sql, maxRows: 1, recordHistory: false)
+                let text = result?.rows.first?.first ?? nil
+                count = text.flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            } else {
+                count = (try? await connectedSession().rowCount(of: table, filter: currentFilter)) ?? nil
+            }
             guard current == countGeneration else { return }
-            let text = result?.rows.first?.first ?? nil
-            totalCount = text.flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            totalCount = count
             isCounting = false
         }
     }
@@ -319,9 +334,15 @@ final class TableBrowserModel {
     // MARK: Filter building
 
     /// Builds a WHERE expression from the filter bar's simple mode, quoting the column and the value
-    /// for the current dialect. Returns nil when the draft is incomplete.
+    /// for the current dialect. Returns nil when the draft is incomplete. For MongoDB it is a query
+    /// document, for Redis a key pattern.
     func filterExpression(for draft: FilterDraft) -> String? {
         guard !draft.column.isEmpty else { return nil }
+        switch dialect.kind {
+        case .mongodb: return Self.mongoFilter(for: draft)
+        case .redis: return Self.redisPattern(for: draft)
+        case .postgres, .mysql, .sqlite: break
+        }
         let column = dialect.quoteIdentifier(draft.column)
         let value = draft.value
         switch draft.op {
@@ -346,10 +367,82 @@ final class TableBrowserModel {
         }
     }
 
+    /// A MongoDB query document for the simple filter. Values are read like the shell reads them (numbers,
+    /// true, null, ObjectId("…")); anything else is a string. 24 hex digits match an ObjectId or that text.
+    static func mongoFilter(for draft: FilterDraft) -> String? {
+        let field = BSONFormatting.quote(draft.column)
+        let text = draft.value.trimmingCharacters(in: .whitespaces)
+        func literal(_ value: String) -> String {
+            if let parsed = try? MongoShellParser.value(value) {
+                switch parsed {
+                case .document, .array: break
+                default: return value
+                }
+            }
+            return BSONFormatting.quote(value)
+        }
+        func comparable(_ value: String) -> String {
+            if value.count == 24, MongoShellParser.hexBytes(value) != nil {
+                return "ObjectId(\(BSONFormatting.quote(value))), \(BSONFormatting.quote(value))"
+            }
+            return literal(value)
+        }
+        func regex(_ pattern: String) -> String {
+            var out = "^"
+            for character in pattern {
+                switch character {
+                case "%": out += ".*"
+                case "_": out += "."
+                case "/": out += "\\/"
+                case _ where "\\^$.|?*+()[]{}".contains(character): out += "\\" + String(character)
+                default: out.append(character)
+                }
+            }
+            return "/" + out + "$/"
+        }
+        let isHexId = text.count == 24 && MongoShellParser.hexBytes(text) != nil
+        switch draft.op {
+        case .equal: return isHexId ? "{ \(field): { $in: [\(comparable(text))] } }" : "{ \(field): \(literal(text)) }"
+        case .notEqual: return isHexId ? "{ \(field): { $nin: [\(comparable(text))] } }" : "{ \(field): { $ne: \(literal(text)) } }"
+        case .less: return "{ \(field): { $lt: \(literal(text)) } }"
+        case .greater: return "{ \(field): { $gt: \(literal(text)) } }"
+        case .lessOrEqual: return "{ \(field): { $lte: \(literal(text)) } }"
+        case .greaterOrEqual: return "{ \(field): { $gte: \(literal(text)) } }"
+        case .like: return "{ \(field): \(regex(draft.value)) }"
+        case .notLike: return "{ \(field): { $not: \(regex(draft.value)) } }"
+        case .isNull: return "{ \(field): null }"
+        case .isNotNull: return "{ \(field): { $ne: null } }"
+        case .in:
+            let items = draft.value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            guard !items.isEmpty else { return nil }
+            return "{ \(field): { $in: [\(items.map(comparable).joined(separator: ", "))] } }"
+        }
+    }
+
+    /// A SCAN pattern for the simple filter: only the key column can be matched, exactly or with LIKE's
+    /// % and _ wildcards.
+    static func redisPattern(for draft: FilterDraft) -> String? {
+        guard draft.column == "key", !draft.value.isEmpty else { return nil }
+        func escaped(_ character: Character) -> String {
+            "*?[]\\^".contains(character) ? "\\" + String(character) : String(character)
+        }
+        switch draft.op {
+        case .equal: return draft.value.map(escaped).joined()
+        case .like:
+            return draft.value.map { $0 == "%" ? "*" : $0 == "_" ? "?" : escaped($0) }.joined()
+        default: return nil
+        }
+    }
+
     // MARK: Editing
 
     /// Why the table can't be edited, or nil when it can.
     var readOnlyReason: String? {
+        switch dialect.kind {
+        case .redis: return "Keys are read-only here. Change them with commands in a query tab."
+        case .mongodb: return "Documents are read-only here. Change them with commands in a query tab."
+        case .postgres, .mysql, .sqlite: break
+        }
         if tableKind != .table { return "Views are read-only." }
         if needsReload { return "The table changed. Reload to edit." }
         if let structureError, structure == nil {

@@ -53,6 +53,7 @@ enum SQLHighlighter {
     // MARK: - Scanner
 
     private static func scan(_ s: UnsafeBufferPointer<UInt16>, kind: DatabaseKind) -> [Token] {
+        if !kind.isSQL { return CommandScript.tokens(s, kind: kind) }
         let n = s.count
         var tokens: [Token] = []
         tokens.reserveCapacity(n / 8)

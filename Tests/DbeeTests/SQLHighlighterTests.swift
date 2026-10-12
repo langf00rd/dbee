@@ -156,7 +156,7 @@ private func lex(_ sql: String, _ kind: DatabaseKind = .postgres) -> [String] {
     }
 
     @Test func keywordListsHaveNoGaps() {
-        for kind in DatabaseKind.allCases {
+        for kind in DatabaseKind.sqlKinds {
             let words = SQLKeywords.completionWords(for: kind)
             #expect(words == words.sorted())
             #expect(Set(words).count == words.count)

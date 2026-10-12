@@ -6,14 +6,21 @@ enum DatabaseKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case postgres
     case mysql
     case sqlite
+    case redis
+    case mongodb
 
     var id: String { rawValue }
+
+    /// The engines that speak SQL.
+    static let sqlKinds: [DatabaseKind] = allCases.filter(\.isSQL)
 
     var displayName: String {
         switch self {
         case .postgres: "PostgreSQL"
         case .mysql: "MySQL / MariaDB"
         case .sqlite: "SQLite"
+        case .redis: "Redis"
+        case .mongodb: "MongoDB"
         }
     }
 
@@ -22,6 +29,8 @@ enum DatabaseKind: String, Codable, CaseIterable, Identifiable, Sendable {
         case .postgres: 5432
         case .mysql: 3306
         case .sqlite: 0
+        case .redis: 6379
+        case .mongodb: 27017
         }
     }
 
@@ -31,11 +40,20 @@ enum DatabaseKind: String, Codable, CaseIterable, Identifiable, Sendable {
     /// Whether the connection goes over the network (and can therefore use TLS / SSH).
     var isNetworked: Bool { self != .sqlite }
 
+    /// Whether the engine speaks SQL. Redis and MongoDB take their own commands in the query editor and
+    /// page through keys and collections with driver calls instead of generated SQL.
+    var isSQL: Bool { self != .redis && self != .mongodb }
+
+    /// Whether a connection needs a user name. Redis and MongoDB servers often run without authentication.
+    var requiresUsername: Bool { isSQL && self != .sqlite }
+
     var symbolName: String {
         switch self {
         case .postgres: "cylinder.split.1x2"
         case .mysql: "cylinder"
         case .sqlite: "doc.text"
+        case .redis: "key"
+        case .mongodb: "leaf"
         }
     }
 }
@@ -185,12 +203,18 @@ enum TableKind: String, Sendable {
     case table
     case view
     case materializedView
+    /// A MongoDB collection.
+    case collection
+    /// The keys of one Redis database, browsed as a single table.
+    case keys
 
     var symbolName: String {
         switch self {
         case .table: "tablecells"
         case .view: "eye"
         case .materializedView: "eye.square"
+        case .collection: "doc.on.doc"
+        case .keys: "key"
         }
     }
 }

@@ -11,7 +11,8 @@ import Foundation
 struct SQLDialect: Sendable {
     var kind: DatabaseKind
 
-    /// "name" for Postgres/SQLite, `name` for MySQL, with embedded quote characters doubled.
+    /// "name" for Postgres/SQLite (and Redis/MongoDB, where it is only used for display and exports),
+    /// `name` for MySQL, with embedded quote characters doubled.
     /// No engine allows NUL in identifiers, so NUL becomes U+FFFD: the statement then fails with
     /// "no such object" instead of being truncated or matching a different object.
     func quoteIdentifier(_ name: String) -> String {
@@ -33,8 +34,10 @@ struct SQLDialect: Sendable {
         return String(out)
     }
 
-    /// schema.table, each part quoted. Omits the schema when nil.
+    /// schema.table, each part quoted. Omits the schema when nil. A MongoDB collection is written the way
+    /// the query editor reads it: db.getCollection("name").
     func qualifiedName(_ table: TableRef) -> String {
+        if kind == .mongodb { return "db.getCollection(" + BSONFormatting.quote(table.name) + ")" }
         let name = quoteIdentifier(table.name)
         guard let schema = table.schema else { return name }
         return quoteIdentifier(schema) + "." + name
@@ -55,7 +58,7 @@ struct SQLDialect: Sendable {
             guard scalars.contains("\\") || scalars.contains("\0") else { return Self.standardQuoted(scalars) }
             let hex = value.utf8.map { String(format: "%02X", $0) }.joined()
             return "_utf8mb4 X'" + hex + "'"
-        case .postgres, .sqlite:
+        case .postgres, .sqlite, .redis, .mongodb:
             let quote: (Substring.UnicodeScalarView) -> String = { [kind] part in
                 Self.standardQuoted(part, escapingBackslashes: kind == .postgres && part.contains("\\"))
             }
@@ -82,6 +85,7 @@ struct SQLDialect: Sendable {
         case .postgres: return type == "bytea"
         case .mysql: return type.hasPrefix("binary") || type.hasPrefix("varbinary") || type.hasSuffix("blob")
         case .sqlite: return type.contains("blob")
+        case .redis, .mongodb: return false
         }
     }
 
@@ -146,19 +150,23 @@ struct SQLDialect: Sendable {
         return target + " (" + columns + ") VALUES (" + literals + ")"
     }
 
-    /// TRUNCATE TABLE t; SQLite has no TRUNCATE, so it uses DELETE FROM t.
+    /// TRUNCATE TABLE t; SQLite has no TRUNCATE, so it uses DELETE FROM t. MongoDB deletes every document;
+    /// Redis empties the current database, since its keys are the only table.
     func truncate(_ table: TableRef) -> String {
         switch kind {
         case .postgres, .mysql: "TRUNCATE TABLE " + qualifiedName(table)
         case .sqlite: "DELETE FROM " + qualifiedName(table)
+        case .mongodb: qualifiedName(table) + ".deleteMany({})"
+        case .redis: "FLUSHDB"
         }
     }
 
     /// DROP TABLE / DROP VIEW, or DROP MATERIALIZED VIEW on Postgres (other engines have none).
     func drop(_ table: TableRef, kind tableKind: TableKind) -> String {
         let name = qualifiedName(table)
+        if kind == .mongodb { return name + ".drop()" }
         switch tableKind {
-        case .table: return "DROP TABLE " + name
+        case .table, .collection, .keys: return "DROP TABLE " + name
         case .view: return "DROP VIEW " + name
         case .materializedView: return (kind == .postgres ? "DROP MATERIALIZED VIEW " : "DROP VIEW ") + name
         }
@@ -235,6 +243,11 @@ enum SQLSplitter {
     }
 
     static func split(_ script: String, kind: DatabaseKind) -> [Statement] {
+        switch kind {
+        case .redis: return CommandScript.splitRedis(script)
+        case .mongodb: return CommandScript.splitMongo(script)
+        case .postgres, .mysql, .sqlite: break
+        }
         var script = script
         return script.withUTF8 { bytes in
             var scanner = SQLScanner(bytes: bytes, kind: kind)
@@ -576,7 +589,7 @@ private struct SQLScanner {
         switch kind {
         case .postgres:
             if isKeyword(s, e, Keyword.or) || isKeyword(s, e, Keyword.replace) { return .afterCreate }
-        case .sqlite:
+        case .sqlite, .redis, .mongodb:
             if isKeyword(s, e, Keyword.temp) || isKeyword(s, e, Keyword.temporary) { return .afterCreate }
         case .mysql:
             if isKeyword(s, e, Keyword.or) || isKeyword(s, e, Keyword.replace) || isKeyword(s, e, Keyword.aggregate) {
@@ -591,7 +604,7 @@ private struct SQLScanner {
         switch kind {
         case .postgres:
             isKeyword(s, e, Keyword.function) || isKeyword(s, e, Keyword.procedure)
-        case .sqlite:
+        case .sqlite, .redis, .mongodb:
             isKeyword(s, e, Keyword.trigger)
         case .mysql:
             isKeyword(s, e, Keyword.procedure) || isKeyword(s, e, Keyword.function)

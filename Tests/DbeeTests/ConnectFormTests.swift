@@ -58,7 +58,7 @@ struct ConnectFormTests {
     @Test func rejectsOtherStrings() {
         var config = ConnectionConfig()
         config.host = "before"
-        for input in ["db.example.com", "https://example.com", "postgres://", "redis://h:6379"] {
+        for input in ["db.example.com", "https://example.com", "postgres://", "mongodb+srv://h/app"] {
             #expect(!ConnectionString.apply(input, to: &config))
         }
         #expect(config.host == "before")

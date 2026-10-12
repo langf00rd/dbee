@@ -43,13 +43,27 @@ extension DatabaseDriver {
     var isInTransaction: Bool? { get async { nil } }
 }
 
+/// A driver for an engine without SQL (Redis, MongoDB). The table browser can't generate SELECT and
+/// COUNT statements for it, so the driver pages through a table itself.
+protocol CommandDriver: DatabaseDriver {
+    /// One page of `table`. `filter` is in the engine's own syntax: a key pattern (Redis) or a JSON
+    /// query document (MongoDB). nil or blank for none.
+    func page(of table: TableRef, filter: String?, sort: GridSort?, limit: Int, offset: Int) async throws -> QueryResult
+
+    /// Number of rows `filter` matches, or nil when the engine can't count them cheaply.
+    func count(of table: TableRef, filter: String?) async throws -> Int?
+
+    /// Makes `name` the connection's current database.
+    func useDatabase(_ name: String) async throws
+}
+
 /// How a driver reaches its server when that isn't a plain TCP dial to host:port, i.e. through an SSH tunnel.
 struct DriverTransport: Sendable {
     /// Called right before every TCP dial to host:port, including side connections (cancel, reconnect).
     /// A tunnel uses it to let exactly that connection through its local listener.
     var willDial: @Sendable () -> Void = {}
     /// Opens a byte channel already connected to the server, used instead of dialing host:port by drivers
-    /// that can run over one (Postgres). Nothing else on the Mac can reach such a channel.
+    /// that can run over one (Postgres, Redis, MongoDB). Nothing else on the Mac can reach such a channel.
     var openChannel: (@Sendable () async throws -> any Channel)?
 
     static let direct = DriverTransport()
@@ -78,6 +92,10 @@ enum DriverFactory {
         case .sqlite:
             // Opens off the main actor so a slow or network volume can't stall the UI.
             return try await SQLiteDriver.connect(path: config.filePath)
+        case .redis:
+            return try await RedisDriver.connect(config: config, host: host, port: port, transport: transport)
+        case .mongodb:
+            return try await MongoDriver.connect(config: config, host: host, port: port, transport: transport)
         }
     }
 }

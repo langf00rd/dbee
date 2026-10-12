@@ -1,7 +1,8 @@
 import Foundation
 
 /// Understands what people paste into the connect form's host fields: connection URLs such as
-/// `postgres://user:pass@db.example.com:5432/app?sslmode=require`, and ssh-style `user@host:port`.
+/// `postgres://user:pass@db.example.com:5432/app?sslmode=require`, `rediss://:pass@cache:6380/2` or
+/// `mongodb://user:pass@db1,db2/app?tls=true`, and ssh-style `user@host:port`.
 /// Parsed credentials only ever land in the in-memory `ConnectionConfig`.
 enum ConnectionString {
     /// Fills `config` from a connection URL. Returns false, leaving `config` untouched, when `string`
@@ -12,11 +13,18 @@ enum ConnectionString {
         guard let separator = s.range(of: "://") else { return false }
 
         let kind: DatabaseKind
-        switch s[..<separator.lowerBound].lowercased() {
+        let scheme = s[..<separator.lowerBound].lowercased()
+        switch scheme {
         case "postgres", "postgresql", "pgsql": kind = .postgres
         case "mysql", "mariadb": kind = .mysql
         case "sqlite", "sqlite3", "file": kind = .sqlite
+        case "redis", "rediss", "valkey", "valkeys": kind = .redis
+        case "mongodb": kind = .mongodb
         default: return false
+        }
+        if kind == .mongodb, let hosts = mongoHostList(s, after: separator.upperBound) {
+            // A replica set lists several hosts; Dbee connects to the first one.
+            s.replaceSubrange(hosts, with: s[hosts].split(separator: ",").first.map(String.init) ?? "")
         }
 
         if kind == .sqlite {
@@ -53,8 +61,30 @@ enum ConnectionString {
         config.password = components.password ?? query["password"] ?? ""
         config.database = database
         config.filePath = ""
-        if let tls = tlsMode(query) { config.tls = tls }
+        if kind == .mongodb {
+            // MongoDB URLs mean plain TCP unless they set tls=true, which verifies the certificate unless
+            // told otherwise.
+            let insecure = query["tlsallowinvalidcertificates"] == "true" || query["tlsinsecure"] == "true"
+            let enabled = (query["tls"] ?? query["ssl"])?.lowercased() == "true"
+            config.tls = enabled ? (insecure ? .required : .verifyFull) : .disabled
+        } else if let tls = tlsMode(query) {
+            config.tls = tls
+        } else if scheme == "rediss" || scheme == "valkeys" {
+            config.tls = .verifyFull
+        } else if kind == .redis {
+            config.tls = .disabled
+        }
         return true
+    }
+
+    /// The host list of a mongodb:// URL (between the userinfo and the path) when it has several hosts.
+    private static func mongoHostList(_ s: String, after start: String.Index) -> Range<String.Index>? {
+        let rest = s[start...]
+        let end = rest.firstIndex(where: { $0 == "/" || $0 == "?" }) ?? rest.endIndex
+        let authority = rest[..<end]
+        let hostStart = authority.lastIndex(of: "@").map { authority.index(after: $0) } ?? authority.startIndex
+        guard authority[hostStart...].contains(",") else { return nil }
+        return hostStart..<end
     }
 
     /// Splits "user@host", "host:port" or "user@[::1]:2222". Returns nil when there is neither a user nor
