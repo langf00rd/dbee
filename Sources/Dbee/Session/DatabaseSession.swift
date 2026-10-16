@@ -5,6 +5,8 @@ import Observation
 enum SidebarSelection: Hashable {
     case table(TableRef)
     case query(UUID)
+    /// The relationship diagram of the schema with this name.
+    case diagram(String)
 }
 
 /// One editor tab in the query workspace. Lives in memory only.
@@ -66,6 +68,8 @@ final class DatabaseSession {
     /// Per-table browser state so switching tables keeps page/filter/pending edits.
     /// Not observed: `browserModel(for:)` fills it lazily from view bodies, which must not invalidate the view.
     @ObservationIgnored var browserModels: [TableRef: TableBrowserModel] = [:]
+    /// Relationship diagrams by schema name, kept so a rearranged layout survives switching to a table and back.
+    @ObservationIgnored var diagramModels: [String: RelationshipDiagramModel] = [:]
 
     let settings = AppSettings.shared
     /// Asks the user to trust unknown SSH host keys. Replaceable so tests can run without a modal alert.
@@ -248,6 +252,7 @@ final class DatabaseSession {
         currentDatabase = ""
         serverVersion = ""
         browserModels = [:]
+        diagramModels = [:]
         selection = nil
         history = []
         // Tabs keep their SQL for the next connection, but no data read from this server outlives it.
@@ -361,6 +366,7 @@ final class DatabaseSession {
     /// MySQL, so it would now hit the new database) and a table selection.
     private func databaseDidChange() {
         browserModels = [:]
+        diagramModels = [:]
         selection = selection.flatMap { if case .query = $0 { $0 } else { nil } }
     }
 
@@ -406,6 +412,38 @@ final class DatabaseSession {
 
     func structure(of table: TableRef) async throws -> TableStructure {
         try await withLease { try await $0.tableStructure(table) }
+    }
+
+    func diagramTables(in schema: SchemaInfo) async throws -> [DiagramTable] {
+        try await withLease { try await $0.diagramTables(in: schema) }
+    }
+
+    func diagramModel(for schema: String) -> RelationshipDiagramModel {
+        if let model = diagramModels[schema] { return model }
+        let model = RelationshipDiagramModel(session: self, schema: schema)
+        diagramModels[schema] = model
+        return model
+    }
+
+    /// Whether the engine has foreign keys to draw.
+    var supportsDiagram: Bool { kind.isSQL }
+
+    /// Shows the relationship diagram of `schema`, or else of the selected table's schema, or the first one.
+    func showDiagram(schema: String? = nil) {
+        guard supportsDiagram, let name = schema ?? diagramSchemaForSelection else { return }
+        selection = .diagram(name)
+    }
+
+    private var diagramSchemaForSelection: String? {
+        switch selection {
+        case .diagram(let name):
+            return name
+        case .table(let ref):
+            if let owner = schemas.first(where: { $0.tables.contains { $0.ref == ref } }) { return owner.name }
+        case .query, nil:
+            break
+        }
+        return schemas.first?.name
     }
 
     /// One page of a Redis or MongoDB table, read by the driver (see `CommandDriver`).
@@ -555,6 +593,7 @@ final class DatabaseSession {
     /// old structure. Browsers (without pending edits) and the selection of tables that no longer exist
     /// are dropped.
     private func schemaDidChange() {
+        for model in diagramModels.values { model.markStale() }
         guard schemaError == nil else {
             for model in browserModels.values { model.markStale() }
             return
@@ -568,6 +607,11 @@ final class DatabaseSession {
             }
         }
         if case .table(let ref) = selection, !existing.contains(ref) {
+            selection = queryTabs.last.map { .query($0.id) }
+        }
+        let schemaNames = Set(schemas.map(\.name))
+        diagramModels = diagramModels.filter { schemaNames.contains($0.key) }
+        if case .diagram(let name) = selection, !schemaNames.contains(name) {
             selection = queryTabs.last.map { .query($0.id) }
         }
     }

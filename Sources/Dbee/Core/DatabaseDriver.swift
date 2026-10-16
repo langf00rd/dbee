@@ -24,6 +24,10 @@ protocol DatabaseDriver: AnyObject, Sendable {
 
     func tableStructure(_ table: TableRef) async throws -> TableStructure
 
+    /// Columns and foreign keys of the tables (not views) in `schema`, for the relationship diagram.
+    /// The default asks `tableStructure` table by table; network drivers read the whole schema at once.
+    func diagramTables(in schema: SchemaInfo) async throws -> [DiagramTable]
+
     /// Executes exactly one SQL statement. Row sets are read up to `maxRows` rows; when more rows exist
     /// the result is marked `truncated`. Non-row statements report `rowsAffected` when known.
     func execute(_ sql: String, maxRows: Int) async throws -> QueryResult
@@ -41,6 +45,23 @@ protocol DatabaseDriver: AnyObject, Sendable {
 
 extension DatabaseDriver {
     var isInTransaction: Bool? { get async { nil } }
+
+    func diagramTables(in schema: SchemaInfo) async throws -> [DiagramTable] {
+        var tables: [DiagramTable] = []
+        var firstError: Error?
+        for info in schema.tables where info.kind == .table {
+            try Task.checkCancellation()
+            do {
+                let structure = try await tableStructure(info.ref)
+                tables.append(DiagramTable(ref: info.ref, columns: structure.columns, foreignKeys: structure.foreignKeys))
+            } catch {
+                // A table dropped since the sidebar was loaded is left out rather than failing the diagram.
+                firstError = firstError ?? error
+            }
+        }
+        if tables.isEmpty, let firstError { throw firstError }
+        return tables
+    }
 }
 
 /// A driver for an engine without SQL (Redis, MongoDB). The table browser can't generate SELECT and

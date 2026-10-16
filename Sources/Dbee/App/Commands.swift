@@ -23,6 +23,9 @@ struct DbeeCommands: Commands {
             Button("Refresh") { refresh() }
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(session?.isConnected != true)
+            Button("Show Relationship Diagram") { session?.showDiagram() }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(session?.isConnected != true || session?.supportsDiagram != true || session?.schemas.isEmpty != false)
 
             Divider()
 

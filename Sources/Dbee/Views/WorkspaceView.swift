@@ -78,6 +78,9 @@ struct WorkspaceView: View {
         case .table(let ref):
             TableBrowserView(model: session.browserModel(for: ref))
                 .id(ref)
+        case .diagram(let schema):
+            RelationshipDiagramView(model: session.diagramModel(for: schema), session: session)
+                .id(schema)
         case .query(let id):
             if let tab = session.queryTab(id) {
                 QueryEditorView(session: session, tab: tab)
@@ -116,6 +119,17 @@ struct WorkspaceView: View {
                 Label("Disconnect", systemImage: "eject")
             }
             .help(disconnectHelp)
+        }
+        if session.supportsDiagram {
+            ToolbarItem {
+                Button {
+                    session.showDiagram()
+                } label: {
+                    Label("Relationship Diagram", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+                .help("Show Relationship Diagram (⇧⌘E)")
+                .disabled(!session.isConnected || session.schemas.isEmpty)
+            }
         }
     }
 

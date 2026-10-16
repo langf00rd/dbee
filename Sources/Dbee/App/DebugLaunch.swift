@@ -7,7 +7,7 @@ import Foundation
 /// and only SQLite is supported because it needs no credentials.
 ///
 /// DBEE_DEBUG_SELECT: "table:<name>" opens a table, "structure:<name>" its structure tab,
-/// "query:<sql>" runs SQL in the first query tab. DBEE_DEBUG_APPEARANCE: "light" or "dark".
+/// "query:<sql>" runs SQL in the first query tab, "diagram" shows the relationship diagram. DBEE_DEBUG_APPEARANCE: "light" or "dark".
 @MainActor
 enum DebugLaunch {
     private static var consumed = false
@@ -35,6 +35,8 @@ enum DebugLaunch {
                 guard let info = session.allTables.first(where: { $0.ref.name == name }) else { return }
                 if select.hasPrefix("structure:") { session.browserModel(for: info.ref).displayMode = .structure }
                 session.selection = .table(info.ref)
+            } else if select == "diagram" {
+                session.showDiagram()
             } else if select.hasPrefix("query:"), let tab = session.queryTabs.first {
                 tab.sql = String(select.dropFirst("query:".count))
                 session.selection = .query(tab.id)

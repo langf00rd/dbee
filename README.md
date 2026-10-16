@@ -43,6 +43,10 @@ system appearance (including Dark Mode).
   transaction. While it commits, the transaction has the connection to itself, and Dbee won't start
   one while a transaction you opened in a query tab is still open.
 - **Structure view:** columns, indexes, foreign keys and the table's DDL.
+- **Relationship diagram** (PostgreSQL, MySQL/MariaDB, SQLite): every table of a schema with a line for each
+  foreign key, in crow's foot notation. Drag tables to rearrange them, click one to highlight its relations,
+  double-click to open it. Show all columns or keys only, zoom (pinch or ⌘+/⌘-), and export as a PNG.
+  Open it from the toolbar, Database > Show Relationship Diagram (⇧⌘E) or a schema's context menu.
 - **SQL editor:** syntax highlighting, completion for keywords, table and column names, line
   numbers, find, and comment toggling. Run the statement at the cursor, the selection, or the whole
   script. A script that returns several result sets lets you switch between them, and a running query

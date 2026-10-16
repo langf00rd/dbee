@@ -270,6 +270,14 @@ struct TableStructure: Sendable {
     var primaryKey: [String] { columns.filter(\.isPrimaryKey).map(\.name) }
 }
 
+/// One table of the relationship diagram: its columns and the foreign keys it holds.
+struct DiagramTable: Hashable, Sendable, Identifiable {
+    var ref: TableRef
+    var columns: [ColumnInfo]
+    var foreignKeys: [ForeignKeyInfo]
+    var id: String { ref.id }
+}
+
 // MARK: - Results
 
 /// A single cell. nil means SQL NULL. Binary data is rendered as a hex string ("\\x0a1b…").

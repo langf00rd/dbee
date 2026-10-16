@@ -33,6 +33,11 @@ struct SidebarView: View {
                     }
                 } header: {
                     Text(section.title)
+                        .contextMenu {
+                            if session.supportsDiagram {
+                                Button("Show Relationship Diagram") { session.showDiagram(schema: section.id) }
+                            }
+                        }
                 }
             }
         }
@@ -175,6 +180,9 @@ struct SidebarView: View {
 
     @ViewBuilder private func tableMenu(_ table: TableInfo) -> some View {
         Button("Open") { session.selection = .table(table.ref) }
+        if session.supportsDiagram, table.kind == .table {
+            Button("Show in Relationship Diagram") { showInDiagram(table) }
+        }
         Button("Open in New Query") {
             session.newQueryTab(sql: Self.browseStatement(for: table.ref, dialect: session.dialect))
         }
@@ -234,6 +242,13 @@ struct SidebarView: View {
                 actionError = SidebarActionError(title: action.failureTitle, message: DatabaseSession.describe(error))
             }
         }
+    }
+
+    /// Opens the diagram of the table's schema with the table highlighted.
+    private func showInDiagram(_ table: TableInfo) {
+        guard let schema = session.schemas.first(where: { $0.tables.contains { $0.ref == table.ref } }) else { return }
+        session.diagramModel(for: schema.name).selectedTable = table.ref.id
+        session.showDiagram(schema: schema.name)
     }
 
     private func copyToPasteboard(_ string: String) {

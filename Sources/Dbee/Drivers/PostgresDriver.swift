@@ -324,6 +324,69 @@ final class PostgresDriver: DatabaseDriver, @unchecked Sendable {
         )
     }
 
+    /// Two catalog queries for the whole schema instead of several per table. Partitions are left out:
+    /// they repeat their parent's columns, and the foreign keys cloned onto them (conparentid <> 0) with it.
+    func diagramTables(in schema: SchemaInfo) async throws -> [DiagramTable] {
+        let version = state.withLockedValue { $0.versionNumber }
+        let notPartition = version >= 100_000 ? "AND NOT c.relispartition" : ""
+        let topLevelConstraint = version >= 110_000 ? "AND con.conparentid = 0" : ""
+        let columnRows = try await fetch("""
+            SELECT c.relname, a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), a.attnotnull,
+                   EXISTS (SELECT 1 FROM pg_catalog.pg_index i
+                            WHERE i.indrelid = a.attrelid AND i.indisprimary AND a.attnum = ANY (i.indkey))
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+            WHERE n.nspname = $1::text AND c.relkind IN ('r', 'p', 'f') \(notPartition)
+            ORDER BY c.relname, a.attnum
+            """, [schema.name]).rows
+        let foreignKeyRows = try await fetch("""
+            SELECT c.relname, con.conname,
+                   (SELECT json_agg(a.attname ORDER BY k.ord)
+                      FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+                      JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum),
+                   fn.nspname, fc.relname,
+                   (SELECT json_agg(a.attname ORDER BY k.ord)
+                      FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord)
+                      JOIN pg_catalog.pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum),
+                   con.confupdtype::text, con.confdeltype::text
+            FROM pg_catalog.pg_constraint con
+            JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            JOIN pg_catalog.pg_class fc ON fc.oid = con.confrelid
+            JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
+            WHERE n.nspname = $1::text AND con.contype = 'f' \(notPartition) \(topLevelConstraint)
+            ORDER BY c.relname, con.conname
+            """, [schema.name]).rows
+
+        var order: [String] = []
+        var columns: [String: [ColumnInfo]] = [:]
+        for row in columnRows {
+            guard row.count == 5, let table = row[0], let name = row[1] else { continue }
+            if columns[table] == nil { order.append(table) }
+            columns[table, default: []].append(ColumnInfo(
+                name: name, dataType: row[2] ?? "", isNullable: row[3] != "t",
+                defaultValue: nil, isPrimaryKey: row[4] == "t", comment: nil
+            ))
+        }
+        var foreignKeys: [String: [ForeignKeyInfo]] = [:]
+        for row in foreignKeyRows {
+            guard row.count == 8, let table = row[0], let name = row[1], let target = row[4] else { continue }
+            foreignKeys[table, default: []].append(ForeignKeyInfo(
+                name: name,
+                columns: Self.jsonStrings(row[2]),
+                referencedTable: TableRef(schema: row[3], name: target),
+                referencedColumns: Self.jsonStrings(row[5]),
+                onUpdate: Self.referentialAction(row[6]),
+                onDelete: Self.referentialAction(row[7])
+            ))
+        }
+        return order.map { table in
+            DiagramTable(ref: TableRef(schema: schema.name, name: table),
+                         columns: columns[table] ?? [], foreignKeys: foreignKeys[table] ?? [])
+        }
+    }
+
     func execute(_ sql: String, maxRows: Int) async throws -> QueryResult {
         // A portal stopped at the row limit never processes the remaining rows, so a locking clause would
         // lock only the rows fetched. Such statements run to completion and are truncated client-side.

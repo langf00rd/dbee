@@ -375,6 +375,54 @@ final class MySQLDriver: DatabaseDriver, @unchecked Sendable {
         }
     }
 
+    /// Two information_schema queries for the whole database instead of four per table.
+    func diagramTables(in schema: SchemaInfo) async throws -> [DiagramTable] {
+        try await serialized {
+            let connection = try await liveConnection()
+            let database = MySQLFormatting.stringLiteral(schema.name)
+            let columnRows = try await query("""
+                SELECT c.TABLE_NAME, c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_KEY
+                FROM information_schema.COLUMNS c
+                JOIN information_schema.TABLES t
+                  ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+                WHERE c.TABLE_SCHEMA = \(database) AND t.TABLE_TYPE = 'BASE TABLE'
+                ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
+                """, on: connection).rows
+            let foreignKeyRows = try await query("""
+                SELECT k.TABLE_NAME, k.CONSTRAINT_NAME, k.COLUMN_NAME, k.TABLE_SCHEMA, k.REFERENCED_TABLE_SCHEMA,
+                       k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME, r.UPDATE_RULE, r.DELETE_RULE
+                FROM information_schema.KEY_COLUMN_USAGE k
+                JOIN information_schema.REFERENTIAL_CONSTRAINTS r
+                  ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA
+                 AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+                 AND r.TABLE_NAME = k.TABLE_NAME
+                WHERE k.TABLE_SCHEMA = \(database) AND k.REFERENCED_TABLE_NAME IS NOT NULL
+                ORDER BY k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION
+                """, on: connection).rows
+
+            var order: [String] = []
+            var columns: [String: [ColumnInfo]] = [:]
+            for row in columnRows {
+                guard row.count == 5, let table = row[0], let name = row[1] else { continue }
+                if columns[table] == nil { order.append(table) }
+                columns[table, default: []].append(ColumnInfo(
+                    name: name, dataType: row[2] ?? "", isNullable: row[3]?.uppercased() == "YES",
+                    defaultValue: nil, isPrimaryKey: row[4] == "PRI", comment: nil
+                ))
+            }
+            var foreignKeyRowsByTable: [String: [[CellValue]]] = [:]
+            for row in foreignKeyRows {
+                guard let table = row.first ?? nil else { continue }
+                foreignKeyRowsByTable[table, default: []].append(Array(row.dropFirst()))
+            }
+            return order.map { name in
+                let table = TableRef(schema: nil, name: name)
+                return DiagramTable(ref: table, columns: columns[name] ?? [],
+                                    foreignKeys: Self.foreignKeys(from: foreignKeyRowsByTable[name] ?? [], table: table))
+            }
+        }
+    }
+
     func execute(_ sql: String, maxRows: Int) async throws -> QueryResult {
         try await serialized {
             let connection = try await liveConnection()
