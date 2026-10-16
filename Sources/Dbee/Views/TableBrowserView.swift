@@ -130,7 +130,7 @@ struct TableBrowserView: View {
                     onSort: { sort in navigate { await model.setSort(sort) } },
                     onEdit: { cell, value in model.setValue(value, at: cell) },
                     onDeleteRows: { rows in model.deleteRows(rows) },
-                    insertTarget: model.dialect.kind.isSQL ? (dialect: model.dialect, table: model.table) : nil,
+                    insertTarget: model.dialect.kind.pagesWithSQL ? (dialect: model.dialect, table: model.table) : nil,
                     onShowInspector: { showInspector = true },
                     numericColumns: numericColumns,
                     dataGeneration: pageGeneration,
@@ -504,12 +504,11 @@ private struct TableBrowserFilterBar: View {
 
             if kind != .redis {
                 Toggle(isOn: rawModeBinding) {
-                    Label(kind == .mongodb ? "Query Document" : "SQL", systemImage: "chevron.left.forwardslash.chevron.right")
+                    Label(rawToggleTitle, systemImage: "chevron.left.forwardslash.chevron.right")
                         .labelStyle(.iconOnly)
                 }
                 .toggleStyle(.button)
-                .help(model.filterDraft.isRaw ? "Use the column filter"
-                      : kind == .mongodb ? "Write the filter as a query document" : "Write the WHERE clause in SQL")
+                .help(model.filterDraft.isRaw ? "Use the column filter" : rawToggleHelp)
             }
 
             Button("Apply", action: applyDraft)
@@ -532,6 +531,7 @@ private struct TableBrowserFilterBar: View {
         switch kind {
         case .redis: "MATCH"
         case .mongodb: "find"
+        case .meilisearch: "filter"
         default: "WHERE"
         }
     }
@@ -540,7 +540,27 @@ private struct TableBrowserFilterBar: View {
         switch kind {
         case .redis: "user:*"
         case .mongodb: "{ status: \"active\", age: { $gt: 30 } }"
+        case .meilisearch: "genres = horror AND year > 2000"
+        case .scylla: "user_id = 42 AND day > '2024-01-01'"
         default: "id > 10 AND name LIKE 'A%'"
+        }
+    }
+
+    private var rawToggleTitle: String {
+        switch kind {
+        case .mongodb: "Query Document"
+        case .meilisearch: "Filter Expression"
+        case .scylla: "CQL"
+        default: "SQL"
+        }
+    }
+
+    private var rawToggleHelp: String {
+        switch kind {
+        case .mongodb: "Write the filter as a query document"
+        case .meilisearch: "Write the filter in Meilisearch’s filter syntax"
+        case .scylla: "Write the WHERE clause in CQL (Dbee adds ALLOW FILTERING)"
+        default: "Write the WHERE clause in SQL"
         }
     }
 

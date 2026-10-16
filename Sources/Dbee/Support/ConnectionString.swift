@@ -1,8 +1,10 @@
 import Foundation
 
 /// Understands what people paste into the connect form's host fields: connection URLs such as
-/// `postgres://user:pass@db.example.com:5432/app?sslmode=require`, `rediss://:pass@cache:6380/2` or
-/// `mongodb://user:pass@db1,db2/app?tls=true`, and ssh-style `user@host:port`.
+/// `postgres://user:pass@db.example.com:5432/app?sslmode=require`, `rediss://:pass@cache:6380/2`,
+/// `mongodb://user:pass@db1,db2/app?tls=true` or `clickhouse://default@olap:8123/logs`, and ssh-style
+/// `user@host:port`. An http(s):// URL is read for ClickHouse and Meilisearch, which speak HTTP, when one of
+/// them is already selected.
 /// Parsed credentials only ever land in the in-memory `ConnectionConfig`.
 enum ConnectionString {
     /// Fills `config` from a connection URL. Returns false, leaving `config` untouched, when `string`
@@ -20,8 +22,14 @@ enum ConnectionString {
         case "sqlite", "sqlite3", "file": kind = .sqlite
         case "redis", "rediss", "valkey", "valkeys": kind = .redis
         case "mongodb": kind = .mongodb
+        case "clickhouse", "ch": kind = .clickhouse
+        case "cassandra", "scylla", "scylladb", "cql": kind = .scylla
+        case "http", "https":
+            guard config.kind == .clickhouse || config.kind == .meilisearch else { return false }
+            kind = config.kind
         default: return false
         }
+        let isHTTP = scheme == "http" || scheme == "https"
         if kind == .mongodb, let hosts = mongoHostList(s, after: separator.upperBound) {
             // A replica set lists several hosts; Dbee connects to the first one.
             s.replaceSubrange(hosts, with: s[hosts].split(separator: ",").first.map(String.init) ?? "")
@@ -56,10 +64,10 @@ enum ConnectionString {
 
         config.kind = kind
         config.host = host
-        config.port = components.port ?? kind.defaultPort
+        config.port = components.port ?? (isHTTP ? (scheme == "https" ? 443 : 80) : kind.defaultPort)
         config.username = components.user ?? query["user"] ?? ""
-        config.password = components.password ?? query["password"] ?? ""
-        config.database = database
+        config.password = components.password ?? query["password"] ?? query["key"] ?? ""
+        config.database = kind.hasDatabases ? database : ""
         config.filePath = ""
         if kind == .mongodb {
             // MongoDB URLs mean plain TCP unless they set tls=true, which verifies the certificate unless
@@ -69,9 +77,9 @@ enum ConnectionString {
             config.tls = enabled ? (insecure ? .required : .verifyFull) : .disabled
         } else if let tls = tlsMode(query) {
             config.tls = tls
-        } else if scheme == "rediss" || scheme == "valkeys" {
+        } else if scheme == "rediss" || scheme == "valkeys" || scheme == "https" || query["secure"] == "true" {
             config.tls = .verifyFull
-        } else if kind == .redis {
+        } else if kind.defaultTLS == .disabled {
             config.tls = .disabled
         }
         return true

@@ -6,12 +6,15 @@ enum DatabaseKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case postgres
     case mysql
     case sqlite
+    case clickhouse
+    case scylla
     case redis
     case mongodb
+    case meilisearch
 
     var id: String { rawValue }
 
-    /// The engines that speak SQL.
+    /// The engines whose query editor speaks SQL or a dialect of it (CQL).
     static let sqlKinds: [DatabaseKind] = allCases.filter(\.isSQL)
 
     var displayName: String {
@@ -19,8 +22,11 @@ enum DatabaseKind: String, Codable, CaseIterable, Identifiable, Sendable {
         case .postgres: "PostgreSQL"
         case .mysql: "MySQL / MariaDB"
         case .sqlite: "SQLite"
+        case .clickhouse: "ClickHouse"
+        case .scylla: "ScyllaDB / Cassandra"
         case .redis: "Redis"
         case .mongodb: "MongoDB"
+        case .meilisearch: "Meilisearch"
         }
     }
 
@@ -29,8 +35,11 @@ enum DatabaseKind: String, Codable, CaseIterable, Identifiable, Sendable {
         case .postgres: 5432
         case .mysql: 3306
         case .sqlite: 0
+        case .clickhouse: 8123
+        case .scylla: 9042
         case .redis: 6379
         case .mongodb: 27017
+        case .meilisearch: 7700
         }
     }
 
@@ -40,20 +49,49 @@ enum DatabaseKind: String, Codable, CaseIterable, Identifiable, Sendable {
     /// Whether the connection goes over the network (and can therefore use TLS / SSH).
     var isNetworked: Bool { self != .sqlite }
 
-    /// Whether the engine speaks SQL. Redis and MongoDB take their own commands in the query editor and
-    /// page through keys and collections with driver calls instead of generated SQL.
-    var isSQL: Bool { self != .redis && self != .mongodb }
+    /// Whether the query editor speaks SQL (or CQL, which reads like it). Redis, MongoDB and Meilisearch take
+    /// their own commands.
+    var isSQL: Bool {
+        switch self {
+        case .postgres, .mysql, .sqlite, .clickhouse, .scylla: true
+        case .redis, .mongodb, .meilisearch: false
+        }
+    }
 
-    /// Whether a connection needs a user name. Redis and MongoDB servers often run without authentication.
-    var requiresUsername: Bool { isSQL && self != .sqlite }
+    /// Whether the table browser reads pages with generated SELECT and COUNT statements. The other engines
+    /// page through tables with driver calls (see `CommandDriver`); CQL has no OFFSET.
+    var pagesWithSQL: Bool { isSQL && self != .scylla }
+
+    /// Whether the engine has transactions, which the table browser needs to commit edits.
+    var hasTransactions: Bool { self == .postgres || self == .mysql || self == .sqlite }
+
+    /// Whether tables can have foreign keys, so a relationship diagram means something.
+    var hasForeignKeys: Bool { hasTransactions }
+
+    /// Whether a connection needs a user name. The other servers often run without authentication
+    /// (ClickHouse then uses `default`).
+    var requiresUsername: Bool { self == .postgres || self == .mysql }
+
+    /// Whether the engine has user names at all. Meilisearch only takes an API key.
+    var hasUsername: Bool { isNetworked && self != .meilisearch }
+
+    /// Whether the server has several databases (keyspaces for ScyllaDB) to switch between.
+    var hasDatabases: Bool { self != .meilisearch }
+
+    /// TLS for a new connection. Engines other than PostgreSQL and MySQL rarely offer TLS unless set up for
+    /// it, and some don't answer a TLS attempt at all, which would stall every connect.
+    var defaultTLS: TLSMode { self == .postgres || self == .mysql ? .preferred : .disabled }
 
     var symbolName: String {
         switch self {
         case .postgres: "cylinder.split.1x2"
         case .mysql: "cylinder"
         case .sqlite: "doc.text"
+        case .clickhouse: "chart.bar"
+        case .scylla: "circle.hexagongrid"
         case .redis: "key"
         case .mongodb: "leaf"
+        case .meilisearch: "magnifyingglass"
         }
     }
 }
@@ -207,6 +245,8 @@ enum TableKind: String, Sendable {
     case collection
     /// The keys of one Redis database, browsed as a single table.
     case keys
+    /// A Meilisearch index.
+    case searchIndex
 
     var symbolName: String {
         switch self {
@@ -215,6 +255,7 @@ enum TableKind: String, Sendable {
         case .materializedView: "eye.square"
         case .collection: "doc.on.doc"
         case .keys: "key"
+        case .searchIndex: "doc.text.magnifyingglass"
         }
     }
 }

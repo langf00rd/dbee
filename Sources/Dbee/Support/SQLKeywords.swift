@@ -53,6 +53,80 @@ enum SQLKeywords {
         "VACUUM", "UPSERT",
     ]
 
+    static let clickhouse: Set<String> = [
+        "ALIAS", "ANTI", "APPEND", "ARRAY", "ASOF", "ASYNC", "ATTACH", "CLEAR", "CLUSTER", "CODEC", "CUBE",
+        "DATABASES", "DEDUPLICATE", "DESCRIBE", "DETACH", "DICTIONARIES", "DICTIONARY", "EMPTY", "ENGINE",
+        "EPHEMERAL", "EXCHANGE", "FILL", "FINAL", "FORMAT", "FREEZE", "GLOBAL", "GRANULARITY", "ILIKE",
+        "INTERPOLATE", "KILL", "LAYOUT", "LIFETIME", "LIVE", "MATERIALIZE", "MODIFY", "MOVE", "MUTATION",
+        "OPTIMIZE", "PASTE", "POPULATE", "PREWHERE", "PROCESSLIST", "PROJECTION", "QUALIFY", "QUERY", "REFRESH",
+        "ROLLUP", "SAMPLE", "SEMI", "SETTINGS", "SHOW", "SOURCE", "STEP", "SYNC", "SYSTEM", "TABLES", "TOTALS",
+        "TTL", "UNFREEZE", "USE",
+    ]
+
+    static let cql: Set<String> = [
+        "AGGREGATE", "ALLOW", "APPLY", "AUTHORIZE", "BATCH", "CALLED", "CLUSTERING", "COMPACT", "CONSISTENCY",
+        "CONTAINS", "COUNTER", "CUSTOM", "DESCRIBE", "DURABLE_WRITES", "EACH_QUORUM", "FILTERING", "FINALFUNC",
+        "FROZEN", "INITCOND", "INPUT", "JSON", "KEYS", "KEYSPACE", "KEYSPACES", "LANGUAGE", "LIST", "LOCAL_ONE",
+        "LOCAL_QUORUM", "LOCAL_SERIAL", "LOGIN", "MAP", "MODIFY", "NOSUPERUSER", "ONE", "PASSWORD", "PER",
+        "PERMISSION", "PERMISSIONS", "QUORUM", "REPLICATION", "ROLES", "SERIAL", "SFUNC", "STATIC", "STORAGE",
+        "STYPE", "SUPERUSER", "THREE", "TOKEN", "TTL", "TWO", "TYPE", "UNLOGGED", "USE", "USERS", "WRITETIME",
+    ]
+
+    /// ClickHouse type names, spelled as ClickHouse wants them (they are case-sensitive).
+    static let clickhouseTypeNames: [String] = [
+        "AggregateFunction", "Array", "Bool", "Date", "Date32", "DateTime", "DateTime64", "Decimal", "Decimal128",
+        "Decimal256", "Decimal32", "Decimal64", "Dynamic", "Enum16", "Enum8", "FixedString", "Float32", "Float64",
+        "IPv4", "IPv6", "Int128", "Int16", "Int256", "Int32", "Int64", "Int8", "JSON", "LowCardinality", "Map",
+        "Nested", "Nothing", "Nullable", "SimpleAggregateFunction", "String", "Tuple", "UInt128", "UInt16",
+        "UInt256", "UInt32", "UInt64", "UInt8", "UUID", "Variant",
+    ]
+
+    /// Common ClickHouse functions, spelled as ClickHouse wants them.
+    static let clickhouseFunctionNames: [String] = [
+        "any", "anyLast", "argMax", "argMin", "arrayFilter", "arrayJoin", "arrayMap", "avg", "coalesce", "concat",
+        "count", "countIf", "currentDatabase", "dictGet", "formatDateTime", "formatReadableSize", "generateUUIDv4",
+        "groupArray", "groupUniqArray", "has", "if", "ifNull", "isNull", "JSONExtract", "JSONExtractString",
+        "length", "lower", "max", "maxIf", "min", "minIf", "multiIf", "now", "now64", "numbers", "quantile",
+        "quantiles", "replaceAll", "round", "splitByChar", "sum", "sumIf", "throwIf", "toDate", "toDateTime",
+        "toDecimal64", "toFloat64", "toInt64", "toStartOfDay", "toStartOfHour", "toStartOfMonth", "toStartOfWeek",
+        "toString", "toUInt64", "toYYYYMM", "today", "topK", "uniq", "uniqExact", "upper", "version", "yesterday",
+    ]
+
+    static let cqlTypes: Set<String> = [
+        "ASCII", "BIGINT", "BLOB", "BOOLEAN", "COUNTER", "DATE", "DECIMAL", "DOUBLE", "DURATION", "FLOAT", "INET",
+        "INT", "SMALLINT", "TEXT", "TIME", "TIMESTAMP", "TIMEUUID", "TINYINT", "TUPLE", "UUID", "VARCHAR", "VARINT",
+    ]
+
+    static let cqlFunctions: Set<String> = [
+        "AVG", "BLOBASTEXT", "CAST", "COUNT", "CURRENTDATE", "CURRENTTIME", "CURRENTTIMESTAMP", "CURRENTTIMEUUID",
+        "FROMJSON", "MAX", "MAXTIMEUUID", "MIN", "MINTIMEUUID", "NOW", "SUM", "TEXTASBLOB", "TODATE", "TOJSON",
+        "TOKEN", "TOTIMESTAMP", "TOUNIXTIMESTAMP", "TTL", "UUID", "WRITETIME",
+    ]
+
+    /// Meilisearch requests: the HTTP methods, and JSON's literals.
+    static let httpWords: Set<String> = ["GET", "POST", "PUT", "PATCH", "DELETE", "TRUE", "FALSE", "NULL"]
+
+    /// Type names the highlighter colours for `kind`.
+    static func types(for kind: DatabaseKind) -> Set<String> {
+        switch kind {
+        case .clickhouse: clickhouseTypes
+        case .scylla: cqlTypes
+        default: types
+        }
+    }
+
+    /// Function names the highlighter colours (before "(") for `kind`.
+    static func functions(for kind: DatabaseKind) -> Set<String> {
+        switch kind {
+        case .clickhouse: clickhouseFunctions
+        case .scylla: cqlFunctions
+        default: functions
+        }
+    }
+
+    private static let clickhouseTypes = Set(clickhouseTypeNames.map { $0.uppercased() })
+    private static let clickhouseFunctions = Set(clickhouseFunctionNames.map { $0.uppercased() }).union(functions)
+
     /// Built-in type names (highlighted separately from keywords).
     static let types: Set<String> = [
         "BIGINT", "BIGSERIAL", "BINARY", "BIT", "BLOB", "BOOL", "BOOLEAN", "BYTEA", "CHAR", "CIDR",
@@ -90,8 +164,11 @@ enum SQLKeywords {
         case .postgres: postgresAll
         case .mysql: mysqlAll
         case .sqlite: sqliteAll
+        case .clickhouse: clickhouseAll
+        case .scylla: cqlAll
         case .redis: redisCommands
         case .mongodb: mongoWords
+        case .meilisearch: httpWords
         }
     }
 
@@ -101,8 +178,11 @@ enum SQLKeywords {
         case .postgres: postgresCompletion
         case .mysql: mysqlCompletion
         case .sqlite: sqliteCompletion
+        case .clickhouse: clickhouseCompletion
+        case .scylla: cqlCompletion
         case .redis: redisCompletion
         case .mongodb: mongoCompletion
+        case .meilisearch: httpCompletion
         }
     }
 
@@ -171,10 +251,18 @@ enum SQLKeywords {
     private static let postgresAll = common.union(postgres)
     private static let mysqlAll = common.union(mysql)
     private static let sqliteAll = common.union(sqlite)
+    private static let clickhouseAll = common.union(clickhouse)
+    private static let cqlAll = common.union(cql)
 
     private static let postgresCompletion = postgresAll.union(types).union(functions).sorted()
     private static let mysqlCompletion = mysqlAll.union(types).union(functions).sorted()
     private static let sqliteCompletion = sqliteAll.union(types).union(functions).sorted()
+    /// ClickHouse's own names keep their spelling, since it matches them case-sensitively. A name spelled like a
+    /// keyword (if, any) is left to the keyword.
+    private static let clickhouseCompletion = (Array(clickhouseAll) + (clickhouseTypeNames + clickhouseFunctionNames)
+        .filter { !clickhouseAll.contains($0.uppercased()) }).sorted()
+    private static let cqlCompletion = cqlAll.union(cqlTypes).union(cqlFunctions).sorted()
+    private static let httpCompletion = ["DELETE", "GET", "PATCH", "POST", "PUT"]
 }
 
 /// Builds the completion list for a partial word.
@@ -199,8 +287,9 @@ enum SQLCompletion {
         objects.sort { $0.localizedStandardCompare($1) == .orderedAscending }
         var keywords: [String] = []
         for word in SQLKeywords.completionWords(for: kind) where word.lowercased().hasPrefix(lowerPrefix) {
-            // mongosh names are case-sensitive, so they keep their own spelling.
-            let shown = wantsLowercase && kind != .mongodb ? word.lowercased() : word
+            // Mixed-case names (mongosh methods, ClickHouse functions and types) are case-sensitive, so they keep
+            // their own spelling.
+            let shown = wantsLowercase && word == word.uppercased() ? word.lowercased() : word
             if shown != prefix, seen.insert(word.lowercased()).inserted { keywords.append(shown) }
         }
         return Array((objects + keywords).prefix(limit))

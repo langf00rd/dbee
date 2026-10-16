@@ -64,11 +64,11 @@ extension DatabaseDriver {
     }
 }
 
-/// A driver for an engine without SQL (Redis, MongoDB). The table browser can't generate SELECT and
-/// COUNT statements for it, so the driver pages through a table itself.
+/// A driver whose tables the table browser can't page with generated SELECT and COUNT statements: engines
+/// without SQL (Redis, MongoDB, Meilisearch), and CQL, which has no OFFSET. The driver pages through a table itself.
 protocol CommandDriver: DatabaseDriver {
-    /// One page of `table`. `filter` is in the engine's own syntax: a key pattern (Redis) or a JSON
-    /// query document (MongoDB). nil or blank for none.
+    /// One page of `table`. `filter` is in the engine's own syntax: a key pattern (Redis), a JSON query
+    /// document (MongoDB), a filter expression (Meilisearch) or a WHERE condition (CQL). nil or blank for none.
     func page(of table: TableRef, filter: String?, sort: GridSort?, limit: Int, offset: Int) async throws -> QueryResult
 
     /// Number of rows `filter` matches, or nil when the engine can't count them cheaply.
@@ -84,7 +84,7 @@ struct DriverTransport: Sendable {
     /// A tunnel uses it to let exactly that connection through its local listener.
     var willDial: @Sendable () -> Void = {}
     /// Opens a byte channel already connected to the server, used instead of dialing host:port by drivers
-    /// that can run over one (Postgres, Redis, MongoDB). Nothing else on the Mac can reach such a channel.
+    /// that can run over one (all but MySQL). Nothing else on the Mac can reach such a channel.
     var openChannel: (@Sendable () async throws -> any Channel)?
 
     static let direct = DriverTransport()
@@ -117,6 +117,12 @@ enum DriverFactory {
             return try await RedisDriver.connect(config: config, host: host, port: port, transport: transport)
         case .mongodb:
             return try await MongoDriver.connect(config: config, host: host, port: port, transport: transport)
+        case .clickhouse:
+            return try await ClickHouseDriver.connect(config: config, host: host, port: port, transport: transport)
+        case .scylla:
+            return try await ScyllaDriver.connect(config: config, host: host, port: port, transport: transport)
+        case .meilisearch:
+            return try await MeilisearchDriver.connect(config: config, host: host, port: port, transport: transport)
         }
     }
 }

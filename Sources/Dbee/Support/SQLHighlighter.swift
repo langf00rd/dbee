@@ -79,7 +79,8 @@ enum SQLHighlighter {
                 add(i, end, .comment)
                 i = end
 
-            case Char.hash where kind == .mysql:
+            case Char.hash where kind == .mysql || kind == .clickhouse,
+                 Char.slash where next == Char.slash && kind == .scylla:
                 let end = endOfLine(s, from: i + 1)
                 add(i, end, .comment)
                 i = end
@@ -90,7 +91,7 @@ enum SQLHighlighter {
                 i = end
 
             case Char.singleQuote:
-                let end = endOfQuoted(s, from: i + 1, quote: Char.singleQuote, backslashEscapes: kind == .mysql)
+                let end = endOfQuoted(s, from: i + 1, quote: Char.singleQuote, backslashEscapes: kind == .mysql || kind == .clickhouse)
                 add(i, end, .string)
                 i = end
 
@@ -100,13 +101,13 @@ enum SQLHighlighter {
                     add(i, end, .string)
                     i = end
                 } else {
-                    let end = endOfQuoted(s, from: i + 1, quote: Char.doubleQuote, backslashEscapes: false)
+                    let end = endOfQuoted(s, from: i + 1, quote: Char.doubleQuote, backslashEscapes: kind == .clickhouse)
                     add(i, end, .quotedIdentifier)
                     i = end
                 }
 
             case Char.backtick where kind != .postgres:
-                let end = endOfQuoted(s, from: i + 1, quote: Char.backtick, backslashEscapes: false)
+                let end = endOfQuoted(s, from: i + 1, quote: Char.backtick, backslashEscapes: kind == .clickhouse)
                 add(i, end, .quotedIdentifier)
                 i = end
 
@@ -130,6 +131,11 @@ enum SQLHighlighter {
                     } else {
                         i += 1
                     }
+                } else if kind == .scylla, next == Char.dollar, let tagEnd = dollarTagEnd(s, from: i) {
+                    // CQL function bodies: $$ … $$.
+                    let end = endOfDollarQuote(s, tagStart: i, tagEnd: tagEnd)
+                    add(i, end, .string)
+                    i = end
                 } else if kind == .sqlite, isIdentifierStart(next) {
                     let end = endOfIdentifier(s, from: i + 1)
                     add(i, end, .parameter)
@@ -180,11 +186,11 @@ enum SQLHighlighter {
                 }
                 let qualified = i > 0 && s[i - 1] == Char.dot
                 if !qualified, let word = upperCasedASCIIWord(s, start: i, end: end) {
-                    if SQLKeywords.functions.contains(word), nextNonBlank(s, from: end) == Char.openParen {
+                    if SQLKeywords.functions(for: kind).contains(word), nextNonBlank(s, from: end) == Char.openParen {
                         add(i, end, .function)
                     } else if keywords.contains(word) {
                         add(i, end, .keyword)
-                    } else if SQLKeywords.types.contains(word) {
+                    } else if SQLKeywords.types(for: kind).contains(word) {
                         add(i, end, .type)
                     }
                 }

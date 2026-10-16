@@ -1,7 +1,8 @@
 import Foundation
 
 /// Statement splitting and highlighting for the query editor's non-SQL languages: Redis commands (one per
-/// line, as in redis-cli) and mongosh-style MongoDB statements.
+/// line, as in redis-cli), mongosh-style MongoDB statements and Meilisearch HTTP requests; and splitting for
+/// CQL, whose BATCH blocks hold several `;`-terminated statements.
 enum CommandScript {
     // MARK: Splitting
 
@@ -115,16 +116,150 @@ enum CommandScript {
         return statements
     }
 
+    /// CQL: statements end at a `;` outside strings ('…' with '' for a quote), quoted names, $$…$$ function
+    /// bodies and --, // and /* */ comments. `BEGIN [UNLOGGED | COUNTER] BATCH … APPLY BATCH` is one statement,
+    /// although the statements inside it end with `;`.
+    static func splitCQL(_ script: String) -> [SQLSplitter.Statement] {
+        let units = Array(script.utf16)
+        let n = units.count
+        var statements: [SQLSplitter.Statement] = []
+        var start = 0
+        var i = 0
+        var leadingWords: [String] = []
+        var wordCount = 0
+        var previousWord = ""
+        var inBatch = false
+        /// End of the statement's last token that isn't a comment, so trailing comments are left out.
+        var contentEnd = 0
+
+        func finish() {
+            appendTrimmed(units, start, max(start, contentEnd), to: &statements, dashComments: true) { _ in true }
+        }
+
+        while i < n {
+            let c = units[i]
+            let next: UInt16 = i + 1 < n ? units[i + 1] : 0
+            defer { if !isBlank(c), i > contentEnd, !isCommentStart(c, next) { contentEnd = i } }
+            switch c {
+            case Char.singleQuote, Char.doubleQuote:
+                i += 1
+                while i < n {
+                    if units[i] == c {
+                        if i + 1 < n, units[i + 1] == c { i += 2; continue }
+                        break
+                    }
+                    i += 1
+                }
+                i = min(i + 1, n)
+                continue
+            case Char.dollar where next == Char.dollar:
+                i += 2
+                while i + 1 < n, !(units[i] == Char.dollar && units[i + 1] == Char.dollar) { i += 1 }
+                i = min(i + 2, n)
+                continue
+            case Char.minus where next == Char.minus, Char.slash where next == Char.slash:
+                while i < n, units[i] != Char.newline { i += 1 }
+                continue
+            case Char.slash where next == Char.star:
+                i += 2
+                while i + 1 < n, !(units[i] == Char.star && units[i + 1] == Char.slash) { i += 1 }
+                i = min(i + 2, n)
+                continue
+            case Char.semicolon where !inBatch:
+                finish()
+                start = i + 1
+                contentEnd = start
+                leadingWords = []
+                wordCount = 0
+                previousWord = ""
+                i += 1
+                continue
+            case _ where isLetter(c):
+                var end = i + 1
+                while end < n, isLetter(units[end]) || isDigit(units[end]) { end += 1 }
+                let word = String(decoding: units[i..<end], as: UTF16.self).uppercased()
+                wordCount += 1
+                if leadingWords.count < 3 { leadingWords.append(word) }
+                if word == "BATCH", leadingWords.first == "BEGIN",
+                   wordCount == 2 || (wordCount == 3 && ["UNLOGGED", "COUNTER"].contains(leadingWords[1])) {
+                    inBatch = true
+                } else if word == "BATCH", previousWord == "APPLY" {
+                    inBatch = false
+                }
+                previousWord = word
+                i = end
+                continue
+            default:
+                break
+            }
+            i += 1
+        }
+        finish()
+        return statements
+    }
+
+    private static func isCommentStart(_ c: UInt16, _ next: UInt16) -> Bool {
+        (c == Char.minus && next == Char.minus) || (c == Char.slash && (next == Char.slash || next == Char.star))
+    }
+
+    /// The HTTP methods a Meilisearch request starts with.
+    static let httpMethods: Set<String> = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+
+    /// Meilisearch: a request is a line starting with an HTTP method and a path, then an optional JSON body on
+    /// the same line or the lines below, up to the next line that starts with a method. Lines starting with #
+    /// or // between requests are comments.
+    static func splitHTTP(_ script: String) -> [SQLSplitter.Statement] {
+        let units = Array(script.utf16)
+        let n = units.count
+        var statements: [SQLSplitter.Statement] = []
+        var start: Int?
+        /// End of the last line of the current request that isn't blank or a comment.
+        var contentEnd = 0
+
+        func finish() {
+            guard let begin = start else { return }
+            appendTrimmed(units, begin, contentEnd, to: &statements) { _ in true }
+            start = nil
+        }
+
+        var lineStart = 0
+        while lineStart <= n {
+            var lineEnd = lineStart
+            while lineEnd < n, units[lineEnd] != Char.newline { lineEnd += 1 }
+            var first = lineStart
+            while first < lineEnd, isBlank(units[first]) { first += 1 }
+            let isComment = first < lineEnd && (units[first] == Char.hash
+                || (units[first] == Char.slash && first + 1 < lineEnd && units[first + 1] == Char.slash))
+            if first < lineEnd, !isComment {
+                var wordEnd = first
+                while wordEnd < lineEnd, isLetter(units[wordEnd]) { wordEnd += 1 }
+                let word = String(decoding: units[first..<wordEnd], as: UTF16.self).uppercased()
+                let startsRequest = httpMethods.contains(word) && (wordEnd == lineEnd || isBlank(units[wordEnd]))
+                if startsRequest || start == nil {
+                    finish()
+                    start = first
+                }
+                contentEnd = lineEnd
+            }
+            lineStart = lineEnd + 1
+        }
+        finish()
+        return statements
+    }
+
     /// Adds units[start..<end] without surrounding whitespace and comment-only lines, when `keep` accepts it.
+    /// With `dashComments`, `--` starts a line comment too (CQL).
     private static func appendTrimmed(_ units: [UInt16], _ start: Int, _ end: Int,
-                                      to statements: inout [SQLSplitter.Statement], keep: (String) -> Bool) {
+                                      to statements: inout [SQLSplitter.Statement], dashComments: Bool = false,
+                                      keep: (String) -> Bool) {
         var s = start
         var e = end
         // Leading blanks and // or /* */ comments aren't part of the statement.
         while s < e {
             if isBlank(units[s]) {
                 s += 1
-            } else if units[s] == Char.slash, s + 1 < e, units[s + 1] == Char.slash {
+            } else if units[s] == Char.slash || (dashComments && units[s] == Char.minus),
+                      s + 1 < e, units[s + 1] == units[s] {
                 while s < e, units[s] != Char.newline { s += 1 }
             } else if units[s] == Char.slash, s + 1 < e, units[s + 1] == Char.star {
                 s += 2
@@ -179,8 +314,9 @@ enum CommandScript {
 
     // MARK: Highlighting
 
-    /// Tokens for Redis and MongoDB text: strings, numbers, comments, and the language's words (Redis
-    /// commands at the start of a line, MongoDB methods and constructors). `$operators` are parameters.
+    /// Tokens for Redis, MongoDB and Meilisearch text: strings, numbers, comments, and the language's words
+    /// (Redis commands and HTTP methods at the start of a line, MongoDB methods and constructors, JSON's
+    /// true, false and null). `$operators` are parameters.
     static func tokens(_ s: UnsafeBufferPointer<UInt16>, kind: DatabaseKind) -> [SQLHighlighter.Token] {
         let n = s.count
         var tokens: [SQLHighlighter.Token] = []
@@ -208,7 +344,7 @@ enum CommandScript {
             let wasLineStart = atLineStart
             atLineStart = false
             switch c {
-            case Char.slash where next == Char.slash, Char.hash where kind == .redis && wasLineStart:
+            case Char.slash where next == Char.slash, Char.hash where kind != .mongodb && wasLineStart:
                 var end = i
                 while end < n, s[end] != Char.newline { end += 1 }
                 add(i, end, .comment)
@@ -269,7 +405,9 @@ enum CommandScript {
                 // Redis module commands have dots (JSON.GET); mongosh words don't.
                 while end < n, isLetter(s[end]) || isDigit(s[end]) || (kind == .redis && s[end] == Char.dot) { end += 1 }
                 let word = String(decoding: UnsafeBufferPointer(rebasing: s[i..<end]), as: UTF16.self).uppercased()
-                let isKeyword = kind == .redis ? (wasLineStart || lastSignificant == 0) && words.contains(word) : words.contains(word)
+                let isKeyword = kind == .mongodb ? words.contains(word)
+                    : kind == .redis ? (wasLineStart || lastSignificant == 0) && words.contains(word)
+                    : words.contains(word) && (wasLineStart || !httpMethods.contains(word))
                 if isKeyword {
                     add(i, end, .keyword)
                 } else if kind == .mongodb, ["ObjectId", "ISODate", "NumberLong", "NumberInt", "NumberDecimal",

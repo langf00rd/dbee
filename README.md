@@ -1,8 +1,7 @@
 # Dbee
 
-Dbee is a small, native macOS database client for PostgreSQL, MySQL/MariaDB, SQLite, Redis and
-MongoDB. It is built
-for working with databases on remote servers, usually over an SSH tunnel, and it does not store your
+Dbee is a small, native macOS database client for PostgreSQL, MySQL/MariaDB, SQLite, ClickHouse,
+ScyllaDB/Cassandra, Redis, MongoDB and Meilisearch. It is built for working with databases on remote servers, usually over an SSH tunnel, and it does not store your
 credentials in readable form anywhere. The one opt-in exception, Remember with Touch ID, keeps a
 login encrypted by the Mac's Secure Enclave.
 
@@ -11,16 +10,18 @@ system appearance (including Dark Mode).
 
 ## Features
 
-- **Databases:** PostgreSQL, MySQL and MariaDB, local SQLite files, Redis (and Valkey), and MongoDB 3.6
-  or later.
+- **Databases:** PostgreSQL, MySQL and MariaDB, local SQLite files, ClickHouse, ScyllaDB (and Cassandra
+  2.2 or later), Redis (and Valkey), MongoDB 3.6 or later, and Meilisearch.
 - **Connections:** TLS modes Off, Preferred, Required (any certificate) and Verify Certificate.
   With Required or Verify Certificate, Dbee refuses a server that doesn't offer TLS before sending
   any login data. Verify Certificate needs the server's host name, not an IP address, for MySQL and
   for connections through an SSH tunnel.
   SSH tunnels with password or private key authentication, including passphrase-protected OpenSSH
   keys (Ed25519, RSA, ECDSA). You can paste a connection URL such as
-  `postgres://db.example.com:5432/app?sslmode=require`, `rediss://cache.example.com:6380/2` or
-  `mongodb://db.example.com/app?tls=true` into the host field. Dbee connects to the one server you
+  `postgres://db.example.com:5432/app?sslmode=require`, `rediss://cache.example.com:6380/2`,
+  `mongodb://db.example.com/app?tls=true`, `clickhouse://olap.example.com/logs` or
+  `cassandra://10.0.0.5/app` into the host field; with ClickHouse or Meilisearch selected, an `http://` or
+  `https://` URL works too. Dbee connects to the one server you
   enter: a MongoDB URL listing several hosts uses the first, and `mongodb+srv://` isn't supported.
 - **Redis:** each database (`db0`, `db1`…) shows its keys as one table with their type, TTL, size and
   value (the first 100 elements of a hash, list, set or sorted set, as JSON), filtered with a `SCAN`
@@ -37,13 +38,34 @@ system appearance (including Dark Mode).
   shell's syntax, including `ObjectId("…")`, `ISODate("…")`, `NumberLong`, `NumberDecimal` and
   `/regex/`. Documents are read-only in the table browser. Logins use SCRAM-SHA-256 or SCRAM-SHA-1,
   against the database you enter and then `admin`.
+- **ClickHouse:** over its HTTP interface (port 8123, or 8443 with TLS). The sidebar lists tables, views and
+  materialized views; the structure view shows columns, the primary, sorting and partition keys, data
+  skipping indexes and `SHOW CREATE TABLE`. Statements run in one server session, so `SET`, `USE` and
+  temporary tables last between them as in clickhouse-client. A result is read as it streams in and stops at
+  the row limit. Rows are read-only in the table browser; ClickHouse has no transactions to commit edits in.
+  A statement with its own `FORMAT` clause shows the output one line per row.
+- **ScyllaDB and Cassandra:** over the CQL native protocol (version 4), to the node you enter. Keyspaces are
+  the databases. The structure view shows partition and clustering keys, secondary indexes and the server's
+  `DESCRIBE TABLE`. The query editor runs CQL (a `BEGIN BATCH … APPLY BATCH` block is one statement) and
+  cqlsh's `CONSISTENCY` command; values are shown the way cqlsh shows them. The table browser pages with the
+  server's paging state and filters with a CQL `WHERE` condition (Dbee adds `ALLOW FILTERING`). CQL can't
+  sort a table or count it cheaply, so sorting applies to the page shown and the row count appears once
+  you reach the last page. Rows are read-only in the table browser. Logins use PasswordAuthenticator.
+- **Meilisearch:** the sidebar lists indexes. The query editor takes requests as Meilisearch's documentation
+  writes them, a method and a path followed by an optional JSON body:
+  `POST /indexes/movies/search { "q": "batman" }`. Requests that start a task (adding documents, changing
+  settings) wait for it to finish and show the finished task, or its error. Search hits and lists become
+  rows, other replies a field/value table. The table browser pages through documents and filters with
+  Meilisearch's filter syntax (the attributes must be filterable); sorting applies to the page shown. The
+  structure view shows the fields with their types and whether they are searchable, filterable or sortable,
+  and the index settings. Enter the API key in the Password field.
 - **Schema sidebar** with a filter field. Switch databases on the server from the toolbar.
 - **Table browser:** paging, sorting, a filter builder, inline cell editing, adding and deleting
   rows. Edits are collected first; you can preview the generated SQL and commit everything in one
   transaction. While it commits, the transaction has the connection to itself, and Dbee won't start
   one while a transaction you opened in a query tab is still open.
 - **Structure view:** columns, indexes, foreign keys and the table's DDL.
-- **Relationship diagram** (PostgreSQL, MySQL/MariaDB, SQLite): every table of a schema with a line for each
+- **Relationship diagram** (PostgreSQL, MySQL/MariaDB, SQLite: the engines with foreign keys): every table of a schema with a line for each
   foreign key, in crow's foot notation. Drag tables to rearrange them, click one to highlight its relations,
   double-click to open it. Show all columns or keys only, zoom (pinch or ⌘+/⌘-), and export as a PNG.
   Open it from the toolbar, Database > Show Relationship Diagram (⇧⌘E) or a schema's context menu.
@@ -75,9 +97,10 @@ Credentials live in memory only for as long as the connection is open, so Dbee c
 switch databases without asking again. They are wiped when you disconnect, close the window or quit.
 A PostgreSQL connection doesn't need the password after signing in (stopping a query uses the
 protocol's cancel key), so the driver drops it right away. MySQL keeps it in memory to reconnect and
-to stop a running query from a second session. Redis and MongoDB keep it to log in again after a
-stopped command (Stop closes their connection, since neither protocol can interrupt a command on the
-same connection) or a dropped connection. If a MySQL connection had to reconnect, Dbee tells you
+to stop a running query from a second session. ClickHouse keeps it to reconnect and to stop a query
+from a second connection; it travels in request headers, never in the URL. ScyllaDB, Meilisearch (the API
+key), Redis and MongoDB keep it to log in again after a stopped command (Stop closes their connection,
+since none of these protocols can interrupt a command on the same connection) or a dropped connection. If a MySQL connection had to reconnect, Dbee tells you
 when session settings such as autocommit, user variables, temporary tables or locks were lost,
 instead of running the next statement without them.
 Disconnecting also discards query results and history; query tabs keep only their SQL text.
@@ -210,9 +233,15 @@ docker run -d --name dbee-it-mariadb -e MARIADB_ROOT_PASSWORD=dbee_test -e MARIA
 docker run -d --name dbee-it-redis -p 127.0.0.1:56379:6379 redis:7 redis-server --requirepass dbee_test
 docker run -d --name dbee-it-mongo -e MONGO_INITDB_ROOT_USERNAME=dbee -e MONGO_INITDB_ROOT_PASSWORD=dbee_test \
   -p 127.0.0.1:57017:27017 mongo:7
+docker run -d --name dbee-it-clickhouse -e CLICKHOUSE_USER=dbee -e CLICKHOUSE_PASSWORD=dbee_test \
+  -e CLICKHOUSE_DB=dbee -p 127.0.0.1:58123:8123 clickhouse/clickhouse-server:24.8
+docker run -d --name dbee-it-scylla -p 127.0.0.1:59042:9042 scylladb/scylla:6.2 \
+  --smp 1 --memory 750M --overprovisioned 1 --authenticator PasswordAuthenticator
+docker run -d --name dbee-it-meili -e MEILI_MASTER_KEY=dbee_test_master_key_0123456789 \
+  -p 127.0.0.1:57700:7700 getmeili/meilisearch:v1.12
 
 DBEE_PG_PORT=55432 DBEE_MYSQL_PORT=53306 DBEE_MARIADB_PORT=53307 DBEE_REDIS_PORT=56379 \
-  DBEE_MONGO_PORT=57017 swift test
+  DBEE_MONGO_PORT=57017 DBEE_CLICKHOUSE_PORT=58123 DBEE_SCYLLA_PORT=59042 DBEE_MEILI_PORT=57700 swift test
 ```
 
 | Variable | Enables |
@@ -222,6 +251,9 @@ DBEE_PG_PORT=55432 DBEE_MYSQL_PORT=53306 DBEE_MARIADB_PORT=53307 DBEE_REDIS_PORT
 | `DBEE_MARIADB_PORT` | The same tests against MariaDB |
 | `DBEE_REDIS_PORT` | Redis driver tests (password `dbee_test`; they empty database 14 and 15) |
 | `DBEE_MONGO_PORT` | MongoDB driver tests (user `dbee`, password `dbee_test`; they drop `dbee_it`) |
+| `DBEE_CLICKHOUSE_PORT` | ClickHouse driver tests (user `dbee`, password `dbee_test`, database `dbee`; they drop `dbee_it`) |
+| `DBEE_SCYLLA_PORT` | ScyllaDB driver tests (user `cassandra`, password `cassandra`; they drop the keyspace `dbee_it`) |
+| `DBEE_MEILI_PORT` | Meilisearch driver tests (API key `dbee_test_master_key_0123456789`; they delete the index `dbee_it_movies`) |
 | `DBEE_SSH_PORT` | SSH tunnel tests against an OpenSSH server |
 | `DBEE_TB_PG_PORT`, `DBEE_TB_MYSQL_PORT` | Table browser editing tests; also need `DBEE_TB_USER`, `DBEE_TB_PASSWORD` and `DBEE_TB_DATABASE`, valid on both servers |
 | `DBEE_E2E_PG_HOST`, `DBEE_E2E_MYSQL_HOST`, `DBEE_E2E_MARIADB_HOST` | End-to-end tests that reach each database through the SSH tunnel (with `DBEE_SSH_PORT`) |
@@ -245,5 +277,6 @@ DBEE_SSH_PORT=52222 DBEE_E2E_PG_HOST=pg DBEE_E2E_MYSQL_HOST=mysql DBEE_E2E_MARIA
 Remove the containers when you're done:
 
 ```sh
-docker rm -f dbee-it-postgres dbee-it-mysql dbee-it-mariadb dbee-it-redis dbee-it-mongo
+docker rm -f dbee-it-postgres dbee-it-mysql dbee-it-mariadb dbee-it-redis dbee-it-mongo \
+  dbee-it-clickhouse dbee-it-scylla dbee-it-meili
 ```

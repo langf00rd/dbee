@@ -254,7 +254,7 @@ final class TableBrowserModel {
         let currentFilter = filter.isEmpty ? nil : filter
         do {
             let result: QueryResult
-            if dialect.kind.isSQL {
+            if dialect.kind.pagesWithSQL {
                 let sql = dialect.selectPage(table, filter: currentFilter, sort: sort, limit: limit, offset: offset)
                 result = try await connectedSession().execute(sql, maxRows: limit, recordHistory: false)
             } else {
@@ -295,7 +295,7 @@ final class TableBrowserModel {
         let current = countGeneration
         let currentFilter = filter.isEmpty ? nil : filter
         let sql = dialect.count(table, filter: currentFilter)
-        let isSQL = dialect.kind.isSQL
+        let isSQL = dialect.kind.pagesWithSQL
         let table = table
         isCounting = true
         countTask = Task { [weak self] in
@@ -334,14 +334,17 @@ final class TableBrowserModel {
     // MARK: Filter building
 
     /// Builds a WHERE expression from the filter bar's simple mode, quoting the column and the value
-    /// for the current dialect. Returns nil when the draft is incomplete. For MongoDB it is a query
-    /// document, for Redis a key pattern.
+    /// for the current dialect. Returns nil when the draft is incomplete, or the engine can't filter that way.
+    /// For MongoDB it is a query document, for Redis a key pattern, for Meilisearch a filter expression.
     func filterExpression(for draft: FilterDraft) -> String? {
         guard !draft.column.isEmpty else { return nil }
+        let type = structure?.columns.first { $0.name == draft.column }?.dataType
         switch dialect.kind {
         case .mongodb: return Self.mongoFilter(for: draft)
         case .redis: return Self.redisPattern(for: draft)
-        case .postgres, .mysql, .sqlite: break
+        case .scylla: return Self.cqlFilter(for: draft, type: type)
+        case .meilisearch: return Self.meilisearchFilter(for: draft)
+        case .postgres, .mysql, .sqlite, .clickhouse: break
         }
         let column = dialect.quoteIdentifier(draft.column)
         let value = draft.value
@@ -353,8 +356,12 @@ final class TableBrowserModel {
         case .lessOrEqual: return "\(column) <= \(dialect.literal(value))"
         case .greaterOrEqual: return "\(column) >= \(dialect.literal(value))"
         case .like, .notLike:
-            // Postgres has no LIKE for non-text types, so compare the text form.
-            let subject = dialect.kind == .postgres ? "CAST(\(column) AS TEXT)" : column
+            // Postgres and ClickHouse have no LIKE for non-text types, so compare the text form.
+            let subject = switch dialect.kind {
+            case .postgres: "CAST(\(column) AS TEXT)"
+            case .clickhouse: "toString(\(column))"
+            default: column
+            }
             return "\(subject) \(draft.op.rawValue) \(dialect.literal(value))"
         case .isNull: return "\(column) IS NULL"
         case .isNotNull: return "\(column) IS NOT NULL"
@@ -419,6 +426,59 @@ final class TableBrowserModel {
         }
     }
 
+    /// A CQL condition for the simple filter. Values for numeric, boolean and uuid columns are written bare,
+    /// anything else as a string. CQL has no <>, NOT LIKE or IS [NOT] NULL in WHERE, so those give nil. LIKE
+    /// works on ScyllaDB (and Cassandra with a SASI index).
+    nonisolated static func cqlFilter(for draft: FilterDraft, type: String?) -> String? {
+        let column = ScyllaDriver.quoteName(draft.column)
+        let bareTypes: Set<String> = ["int", "bigint", "smallint", "tinyint", "varint", "float", "double", "decimal",
+                                      "counter", "boolean", "uuid", "timeuuid"]
+        let bare = type.map { bareTypes.contains($0.lowercased()) } ?? false
+        func literal(_ value: String) -> String {
+            let text = value.trimmingCharacters(in: .whitespaces)
+            return bare && !text.isEmpty && !text.contains("'") ? text : ScyllaDriver.literal(value)
+        }
+        switch draft.op {
+        case .equal: return "\(column) = \(literal(draft.value))"
+        case .less: return "\(column) < \(literal(draft.value))"
+        case .greater: return "\(column) > \(literal(draft.value))"
+        case .lessOrEqual: return "\(column) <= \(literal(draft.value))"
+        case .greaterOrEqual: return "\(column) >= \(literal(draft.value))"
+        case .like: return "\(column) LIKE \(ScyllaDriver.literal(draft.value))"
+        case .in:
+            let items = draft.value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            guard !items.isEmpty else { return nil }
+            return "\(column) IN (\(items.map(literal).joined(separator: ", ")))"
+        case .notEqual, .notLike, .isNull, .isNotNull: return nil
+        }
+    }
+
+    /// A Meilisearch filter for the simple filter. Numbers are written bare, anything else in double quotes.
+    /// The attribute must be filterable in the index's settings. Meilisearch has no LIKE.
+    nonisolated static func meilisearchFilter(for draft: FilterDraft) -> String? {
+        let attribute = draft.column
+        func literal(_ value: String) -> String {
+            let text = value.trimmingCharacters(in: .whitespaces)
+            if text.range(of: #"^-?[0-9]+(\.[0-9]+)?$"#, options: .regularExpression) != nil { return text }
+            return "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        switch draft.op {
+        case .equal: return "\(attribute) = \(literal(draft.value))"
+        case .notEqual: return "\(attribute) != \(literal(draft.value))"
+        case .less: return "\(attribute) < \(literal(draft.value))"
+        case .greater: return "\(attribute) > \(literal(draft.value))"
+        case .lessOrEqual: return "\(attribute) <= \(literal(draft.value))"
+        case .greaterOrEqual: return "\(attribute) >= \(literal(draft.value))"
+        case .isNull: return "\(attribute) IS NULL"
+        case .isNotNull: return "\(attribute) IS NOT NULL"
+        case .in:
+            let items = draft.value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            guard !items.isEmpty else { return nil }
+            return "\(attribute) IN [\(items.map(literal).joined(separator: ", "))]"
+        case .like, .notLike: return nil
+        }
+    }
+
     /// A SCAN pattern for the simple filter: only the key column can be matched, exactly or with LIKE's
     /// % and _ wildcards.
     static func redisPattern(for draft: FilterDraft) -> String? {
@@ -441,6 +501,8 @@ final class TableBrowserModel {
         switch dialect.kind {
         case .redis: return "Keys are read-only here. Change them with commands in a query tab."
         case .mongodb: return "Documents are read-only here. Change them with commands in a query tab."
+        case .meilisearch: return "Documents are read-only here. Change them with requests in a query tab."
+        case .clickhouse, .scylla: return "Rows are read-only here. Change them with statements in a query tab."
         case .postgres, .mysql, .sqlite: break
         }
         if tableKind != .table { return "Views are read-only." }

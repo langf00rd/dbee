@@ -288,7 +288,7 @@ final class DatabaseSession {
     func switchDatabase(_ name: String) async {
         guard let config, name != currentDatabase else { return }
         switch config.kind {
-        case .mysql:
+        case .mysql, .clickhouse:
             do {
                 _ = try await execute("USE \(dialect.quoteIdentifier(name))", recordHistory: false)
                 currentDatabase = name
@@ -300,7 +300,7 @@ final class DatabaseSession {
             }
         case .postgres:
             await switchPostgresDatabase(name, config: config)
-        case .redis, .mongodb:
+        case .scylla, .redis, .mongodb:
             do {
                 try await withLease { driver in
                     guard let driver = driver as? any CommandDriver else { return }
@@ -313,7 +313,7 @@ final class DatabaseSession {
             } catch {
                 schemaError = Self.describe(error)
             }
-        case .sqlite:
+        case .sqlite, .meilisearch:
             break
         }
     }
@@ -426,7 +426,7 @@ final class DatabaseSession {
     }
 
     /// Whether the engine has foreign keys to draw.
-    var supportsDiagram: Bool { kind.isSQL }
+    var supportsDiagram: Bool { kind.hasForeignKeys }
 
     /// Shows the relationship diagram of `schema`, or else of the selected table's schema, or the first one.
     func showDiagram(schema: String? = nil) {
@@ -618,7 +618,7 @@ final class DatabaseSession {
 
     /// Keeps `userTransactionOpen` in step with transaction statements the user runs.
     private func trackTransaction(_ sql: String) {
-        guard kind.isSQL else { return }
+        guard kind.hasTransactions else { return }
         if let opens = Self.transactionEffect(sql, kind: kind) {
             userTransactionOpen = opens
         } else if kind == .mysql, Self.isSchemaChanging(sql) {
@@ -674,8 +674,9 @@ final class DatabaseSession {
 
     // MARK: Helpers
 
-    /// Statements after which the sidebar and table browsers should be refreshed: DDL, and for Redis and
-    /// MongoDB the commands that create, drop or empty collections, indexes and databases.
+    /// Statements after which the sidebar and table browsers should be refreshed: DDL, for Redis and MongoDB
+    /// the commands that create, drop or empty collections, indexes and databases, and for Meilisearch any
+    /// request that changes indexes.
     static func isSchemaChanging(_ sql: String, kind: DatabaseKind = .postgres) -> Bool {
         switch kind {
         case .redis:
@@ -687,6 +688,9 @@ final class DatabaseSession {
                            ".renameCollection(", "db.createCollection(", "db.createView(", "db.dropDatabase(",
                            "{create:", "{drop:", "{\"create\":", "{\"drop\":", "db.runCommand("]
             return changes.contains { text.contains($0) }
+        case .meilisearch:
+            guard let request = try? MeilisearchRequest.parse(sql), request.method != "GET" else { return false }
+            return request.target.hasPrefix("/indexes") || request.target.hasPrefix("/swap-indexes")
         default:
             let head = sql.drop(while: { $0.isWhitespace }).prefix(10).uppercased()
             return ["CREATE", "DROP", "ALTER", "RENAME", "TRUNCATE", "COMMENT", "ATTACH", "DETACH"].contains { head.hasPrefix($0) }
@@ -699,11 +703,15 @@ final class DatabaseSession {
         switch kind {
         case .mysql:
             return mayChangeMySQLDatabase(sql)
+        case .clickhouse:
+            return words.first == "USE" || words == ["DROP", "DATABASE"]
+        case .scylla:
+            return words.first == "USE" || words == ["DROP", "KEYSPACE"]
         case .redis:
             return words.first == "SELECT"
         case .mongodb:
             return words.first == "USE" || sql.contains("dropDatabase")
-        case .postgres, .sqlite:
+        case .postgres, .sqlite, .meilisearch:
             return false
         }
     }

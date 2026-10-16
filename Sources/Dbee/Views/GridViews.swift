@@ -84,13 +84,16 @@ enum GridText {
 
 /// Decides which columns hold numbers, so the grid can right-align them (Numbers / Finder convention).
 enum GridNumeric {
-    /// True for SQL types whose values are plain numbers. Arrays, ranges, intervals, geometric types and
-    /// booleans (including MySQL's tinyint(1)) are excluded.
+    /// True for types whose values are plain numbers. Arrays and other containers (ClickHouse Array(…), CQL
+    /// list<…>), ranges, intervals, geometric types, booleans (including MySQL's tinyint(1)) and mixed types
+    /// (a Meilisearch field seen as "string | number") are excluded.
     static func isNumericType(_ dataType: String) -> Bool {
         let type = dataType.lowercased().trimmingCharacters(in: .whitespaces)
         guard !type.isEmpty, !type.hasSuffix("]"), !type.hasPrefix("_"), !type.contains("interval"),
-              !type.contains("point"), !type.contains("range"), type != "tinyint(1)" else { return false }
-        return ["int", "serial", "numeric", "decimal", "real", "double", "float", "money"].contains { type.contains($0) }
+              !type.contains("point"), !type.contains("range"), type != "tinyint(1)", !type.contains("<"),
+              !type.contains("|"), !["array(", "map(", "tuple(", "nested("].contains(where: type.hasPrefix) else { return false }
+        return ["int", "serial", "numeric", "decimal", "real", "double", "float", "money", "counter", "number"]
+            .contains { type.contains($0) }
     }
 
     /// Columns where at least one of the first `sampleLimit` rows has a value and every non-NULL value parses as a number.

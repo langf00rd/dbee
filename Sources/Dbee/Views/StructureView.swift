@@ -24,18 +24,25 @@ struct StructureView: View {
             }
         }
 
-        /// Sections the engine has: MongoDB has no foreign keys and shows createCollection instead of DDL;
-        /// Redis keys only have their fixed columns.
+        /// Sections the engine has: MongoDB, ClickHouse and CQL have no foreign keys (MongoDB shows
+        /// createCollection instead of DDL); a Meilisearch index has fields and settings; Redis keys only have
+        /// their fixed columns.
         static func available(for kind: DatabaseKind) -> [Section] {
             switch kind {
             case .redis: [.columns]
-            case .mongodb: [.columns, .indexes, .ddl]
+            case .mongodb, .clickhouse, .scylla: [.columns, .indexes, .ddl]
+            case .meilisearch: [.columns, .ddl]
             case .postgres, .mysql, .sqlite: allCases
             }
         }
 
         func title(for kind: DatabaseKind) -> String {
-            self == .ddl && kind == .mongodb ? "Definition" : title
+            guard self == .ddl else { return title }
+            switch kind {
+            case .mongodb: return "Definition"
+            case .meilisearch: return "Settings"
+            default: return title
+            }
         }
     }
 

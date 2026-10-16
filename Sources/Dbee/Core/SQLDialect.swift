@@ -11,19 +11,23 @@ import Foundation
 struct SQLDialect: Sendable {
     var kind: DatabaseKind
 
-    /// "name" for Postgres/SQLite (and Redis/MongoDB, where it is only used for display and exports),
-    /// `name` for MySQL, with embedded quote characters doubled.
+    /// "name" for Postgres/SQLite/CQL (and Redis/MongoDB/Meilisearch, where it is only used for display and
+    /// exports), `name` for MySQL and ClickHouse, with embedded quote characters doubled (backslash-escaped for
+    /// ClickHouse, which reads backslashes as escapes inside identifiers too).
     /// No engine allows NUL in identifiers, so NUL becomes U+FFFD: the statement then fails with
     /// "no such object" instead of being truncated or matching a different object.
     func quoteIdentifier(_ name: String) -> String {
-        let quote: Unicode.Scalar = kind == .mysql ? "`" : "\""
+        let quote: Unicode.Scalar = kind == .mysql || kind == .clickhouse ? "`" : "\""
         var out = String.UnicodeScalarView()
         out.append(quote)
         for scalar in name.unicodeScalars {
             switch scalar {
             case quote:
+                out.append(kind == .clickhouse ? "\\" : quote)
                 out.append(quote)
-                out.append(quote)
+            case "\\" where kind == .clickhouse:
+                out.append("\\")
+                out.append("\\")
             case "\0":
                 out.append("\u{FFFD}")
             default:
@@ -35,9 +39,10 @@ struct SQLDialect: Sendable {
     }
 
     /// schema.table, each part quoted. Omits the schema when nil. A MongoDB collection is written the way
-    /// the query editor reads it: db.getCollection("name").
+    /// the query editor reads it: db.getCollection("name"); a Meilisearch index as its path, /indexes/name.
     func qualifiedName(_ table: TableRef) -> String {
         if kind == .mongodb { return "db.getCollection(" + BSONFormatting.quote(table.name) + ")" }
+        if kind == .meilisearch { return "/indexes/" + HTTPWire.escape(table.name) }
         let name = quoteIdentifier(table.name)
         guard let schema = table.schema else { return name }
         return quoteIdentifier(schema) + "." + name
@@ -58,6 +63,24 @@ struct SQLDialect: Sendable {
             guard scalars.contains("\\") || scalars.contains("\0") else { return Self.standardQuoted(scalars) }
             let hex = value.utf8.map { String(format: "%02X", $0) }.joined()
             return "_utf8mb4 X'" + hex + "'"
+        case .clickhouse:
+            // ClickHouse always reads backslash escapes in string literals, so backslashes and NUL are escaped.
+            var out = String.UnicodeScalarView()
+            out.append("'")
+            for scalar in scalars {
+                switch scalar {
+                case "'": out.append(contentsOf: "''".unicodeScalars)
+                case "\\": out.append(contentsOf: "\\\\".unicodeScalars)
+                case "\0": out.append(contentsOf: "\\0".unicodeScalars)
+                default: out.append(scalar)
+                }
+            }
+            out.append("'")
+            return String(out)
+        case .scylla, .meilisearch:
+            // CQL strings have no escapes; text holding NUL is written as its bytes.
+            guard kind == .scylla, scalars.contains("\0") else { return Self.standardQuoted(scalars) }
+            return "blobAsText(0x" + value.utf8.map { String(format: "%02x", $0) }.joined() + ")"
         case .postgres, .sqlite, .redis, .mongodb:
             let quote: (Substring.UnicodeScalarView) -> String = { [kind] part in
                 Self.standardQuoted(part, escapingBackslashes: kind == .postgres && part.contains("\\"))
@@ -85,7 +108,7 @@ struct SQLDialect: Sendable {
         case .postgres: return type == "bytea"
         case .mysql: return type.hasPrefix("binary") || type.hasPrefix("varbinary") || type.hasSuffix("blob")
         case .sqlite: return type.contains("blob")
-        case .redis, .mongodb: return false
+        case .clickhouse, .scylla, .redis, .mongodb, .meilisearch: return false
         }
     }
 
@@ -150,11 +173,12 @@ struct SQLDialect: Sendable {
         return target + " (" + columns + ") VALUES (" + literals + ")"
     }
 
-    /// TRUNCATE TABLE t; SQLite has no TRUNCATE, so it uses DELETE FROM t. MongoDB deletes every document;
-    /// Redis empties the current database, since its keys are the only table.
+    /// TRUNCATE TABLE t; SQLite has no TRUNCATE, so it uses DELETE FROM t. MongoDB and Meilisearch delete
+    /// every document; Redis empties the current database, since its keys are the only table.
     func truncate(_ table: TableRef) -> String {
         switch kind {
-        case .postgres, .mysql: "TRUNCATE TABLE " + qualifiedName(table)
+        case .postgres, .mysql, .clickhouse, .scylla: "TRUNCATE TABLE " + qualifiedName(table)
+        case .meilisearch: "DELETE " + qualifiedName(table) + "/documents"
         case .sqlite: "DELETE FROM " + qualifiedName(table)
         case .mongodb: qualifiedName(table) + ".deleteMany({})"
         case .redis: "FLUSHDB"
@@ -165,10 +189,12 @@ struct SQLDialect: Sendable {
     func drop(_ table: TableRef, kind tableKind: TableKind) -> String {
         let name = qualifiedName(table)
         if kind == .mongodb { return name + ".drop()" }
+        if kind == .meilisearch { return "DELETE " + name }
         switch tableKind {
-        case .table, .collection, .keys: return "DROP TABLE " + name
+        case .table, .collection, .keys, .searchIndex: return "DROP TABLE " + name
         case .view: return "DROP VIEW " + name
-        case .materializedView: return (kind == .postgres ? "DROP MATERIALIZED VIEW " : "DROP VIEW ") + name
+        case .materializedView:
+            return (kind == .postgres || kind == .scylla ? "DROP MATERIALIZED VIEW " : "DROP VIEW ") + name
         }
     }
 
@@ -202,7 +228,8 @@ struct SQLDialect: Sendable {
         }
         guard !expression.isEmpty else { return "" }
         // A trailing line comment would otherwise swallow the closing parenthesis.
-        let hasLineComment = expression.contains("--") || (kind == .mysql && expression.contains("#"))
+        let hasLineComment = expression.contains("--") || expression.contains("//")
+            || ((kind == .mysql || kind == .clickhouse) && expression.contains("#"))
         return " WHERE (" + expression + (hasLineComment ? "\n)" : ")")
     }
 
@@ -246,7 +273,9 @@ enum SQLSplitter {
         switch kind {
         case .redis: return CommandScript.splitRedis(script)
         case .mongodb: return CommandScript.splitMongo(script)
-        case .postgres, .mysql, .sqlite: break
+        case .scylla: return CommandScript.splitCQL(script)
+        case .meilisearch: return CommandScript.splitHTTP(script)
+        case .postgres, .mysql, .sqlite, .clickhouse: break
         }
         var script = script
         return script.withUTF8 { bytes in
@@ -355,18 +384,18 @@ private struct SQLScanner {
                 }
                 i += 1
             case ASCII.singleQuote:
-                markToken(upTo: quotedEnd(from: i, backslashEscapes: kind == .mysql))
+                markToken(upTo: quotedEnd(from: i, backslashEscapes: kind == .mysql || kind == .clickhouse))
             case ASCII.doubleQuote:
-                markToken(upTo: quotedEnd(from: i, backslashEscapes: kind == .mysql))
+                markToken(upTo: quotedEnd(from: i, backslashEscapes: kind == .mysql || kind == .clickhouse))
             case ASCII.backtick where kind != .postgres:
-                markToken(upTo: quotedEnd(from: i, backslashEscapes: false))
+                markToken(upTo: quotedEnd(from: i, backslashEscapes: kind == .clickhouse))
             case ASCII.openBracket where kind == .sqlite:
                 var j = i + 1
                 while j < count, bytes[j] != ASCII.closeBracket { j += 1 }
                 markToken(upTo: min(j + 1, count))
             case ASCII.minus where peek(1) == ASCII.minus && (kind != .mysql || i + 2 >= count || bytes[i + 2] <= 0x20):
                 skipLineComment()
-            case ASCII.hash where kind == .mysql:
+            case ASCII.hash where kind == .mysql || kind == .clickhouse:
                 skipLineComment()
             case ASCII.slash where peek(1) == ASCII.star:
                 blockComment()
@@ -589,7 +618,7 @@ private struct SQLScanner {
         switch kind {
         case .postgres:
             if isKeyword(s, e, Keyword.or) || isKeyword(s, e, Keyword.replace) { return .afterCreate }
-        case .sqlite, .redis, .mongodb:
+        case .sqlite, .clickhouse, .scylla, .redis, .mongodb, .meilisearch:
             if isKeyword(s, e, Keyword.temp) || isKeyword(s, e, Keyword.temporary) { return .afterCreate }
         case .mysql:
             if isKeyword(s, e, Keyword.or) || isKeyword(s, e, Keyword.replace) || isKeyword(s, e, Keyword.aggregate) {
@@ -604,8 +633,10 @@ private struct SQLScanner {
         switch kind {
         case .postgres:
             isKeyword(s, e, Keyword.function) || isKeyword(s, e, Keyword.procedure)
-        case .sqlite, .redis, .mongodb:
+        case .sqlite, .redis, .mongodb, .meilisearch:
             isKeyword(s, e, Keyword.trigger)
+        case .clickhouse, .scylla:
+            false
         case .mysql:
             isKeyword(s, e, Keyword.procedure) || isKeyword(s, e, Keyword.function)
                 || isKeyword(s, e, Keyword.trigger) || isKeyword(s, e, Keyword.event)

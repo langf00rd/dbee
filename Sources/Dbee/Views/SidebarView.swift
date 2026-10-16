@@ -209,6 +209,7 @@ struct SidebarView: View {
         switch dialect.kind {
         case .mongodb: "\(dialect.qualifiedName(table)).find({}).limit(100)"
         case .redis: "SCAN 0 COUNT 100"
+        case .meilisearch: "POST \(dialect.qualifiedName(table))/search\n{ \"q\": \"\", \"limit\": 100 }"
         default: "SELECT * FROM \(dialect.qualifiedName(table)) LIMIT 100;"
         }
     }
@@ -336,6 +337,7 @@ enum SidebarTableAction: Identifiable {
         case .materializedView: "materialized view"
         case .collection: "collection"
         case .keys: "keys"
+        case .searchIndex: "index"
         }
     }
 
@@ -343,7 +345,7 @@ enum SidebarTableAction: Identifiable {
     var truncateMenuTitle: String? {
         switch table.kind {
         case .table: "Truncate Table"
-        case .collection: "Delete All Documents"
+        case .collection, .searchIndex: "Delete All Documents"
         case .keys: "Delete All Keys"
         case .view, .materializedView: nil
         }
@@ -353,6 +355,7 @@ enum SidebarTableAction: Identifiable {
         switch table.kind {
         case .table: "Drop Table…"
         case .collection: "Drop Collection…"
+        case .searchIndex: "Delete Index…"
         default: "Drop View…"
         }
     }
@@ -361,11 +364,11 @@ enum SidebarTableAction: Identifiable {
         switch self {
         case .truncate(let table):
             switch table.kind {
-            case .collection: "Delete every document in “\(table.ref.name)”?"
+            case .collection, .searchIndex: "Delete every document in “\(table.ref.name)”?"
             case .keys: "Delete every key in this database?"
             default: "Truncate table “\(table.ref.name)”?"
             }
-        case .drop(let table): "Drop \(noun) “\(table.ref.name)”?"
+        case .drop(let table): "\(table.kind == .searchIndex ? "Delete" : "Drop") \(noun) “\(table.ref.name)”?"
         }
     }
 
@@ -375,11 +378,11 @@ enum SidebarTableAction: Identifiable {
             if table.kind == .keys {
                 return "FLUSHDB permanently deletes every key in the current Redis database. This can’t be undone."
             }
-            let rows = table.kind == .collection ? "document" : "row"
+            let rows = table.kind == .collection || table.kind == .searchIndex ? "document" : "row"
             return "Every \(rows) in “\(table.ref.id)” will be permanently deleted. This can’t be undone."
         case .drop(let table):
             switch table.kind {
-            case .table, .collection, .keys:
+            case .table, .collection, .keys, .searchIndex:
                 return "“\(table.ref.id)” and all of its data will be permanently deleted. This can’t be undone."
             case .view:
                 return "The view “\(table.ref.id)” will be deleted. The data it reads from isn’t affected."
@@ -396,6 +399,7 @@ enum SidebarTableAction: Identifiable {
             switch table.kind {
             case .table: "Drop Table"
             case .collection: "Drop Collection"
+            case .searchIndex: "Delete Index"
             default: "Drop View"
             }
         }
@@ -404,7 +408,7 @@ enum SidebarTableAction: Identifiable {
     var failureTitle: String {
         switch self {
         case .truncate(let table): table.kind == .table ? "Couldn’t Truncate “\(table.ref.name)”" : "Couldn’t Delete the Contents of “\(table.ref.name)”"
-        case .drop(let table): "Couldn’t Drop “\(table.ref.name)”"
+        case .drop(let table): table.kind == .searchIndex ? "Couldn’t Delete “\(table.ref.name)”" : "Couldn’t Drop “\(table.ref.name)”"
         }
     }
 }
@@ -484,6 +488,7 @@ private struct SidebarTableRow: View {
         case .materializedView: "Materialized view"
         case .collection: "Collection"
         case .keys: "Keys"
+        case .searchIndex: "Index"
         }
     }
 }
