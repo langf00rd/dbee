@@ -272,3 +272,152 @@ import Testing
         #expect(TableBrowserModel.redisPattern(for: Draft(column: "type", op: .equal, value: "hash")) == nil)
     }
 }
+
+@Suite struct RedisSelectionTests {
+    private func track(_ selection: inout RedisSelection, _ line: String, _ reply: RESPValue) {
+        _ = selection.track(line.uppercased().split(separator: " ").map(String.init), reply: reply)
+    }
+
+    @Test func queuedSelectWaitsForExec() {
+        var selection = RedisSelection(database: 0)
+        track(&selection, "MULTI", .simple("OK"))
+        track(&selection, "SELECT 1", .simple("QUEUED"))
+        #expect(selection.database == 0)
+        track(&selection, "EXEC", .array([.simple("OK")]))
+        #expect(selection.database == 1)
+        #expect(!selection.isInTransaction)
+    }
+
+    @Test func discardedSelectKeepsDatabase() {
+        var selection = RedisSelection(database: 0)
+        track(&selection, "MULTI", .simple("OK"))
+        track(&selection, "SELECT 1", .simple("QUEUED"))
+        track(&selection, "DISCARD", .simple("OK"))
+        #expect(selection.database == 0)
+        #expect(!selection.isInTransaction)
+    }
+
+    @Test func abortedOrFailedExecKeepsDatabase() {
+        var selection = RedisSelection(database: 2)
+        track(&selection, "MULTI", .simple("OK"))
+        track(&selection, "SELECT 1", .simple("QUEUED"))
+        // WATCH conflict: null array.
+        track(&selection, "EXEC", .array(nil))
+        #expect(selection.database == 2)
+
+        track(&selection, "MULTI", .simple("OK"))
+        track(&selection, "SELECT 1", .simple("QUEUED"))
+        track(&selection, "EXEC", .error("EXECABORT Transaction discarded because of previous errors."))
+        #expect(selection.database == 2)
+        #expect(!selection.isInTransaction)
+    }
+
+    @Test func execAppliesOnlyCommandsThatRan() {
+        var selection = RedisSelection(database: 0)
+        track(&selection, "MULTI", .simple("OK"))
+        track(&selection, "SELECT 3", .simple("QUEUED"))
+        track(&selection, "SELECT 99", .simple("QUEUED"))
+        track(&selection, "EXEC", .array([.simple("OK"), .error("ERR DB index is out of range")]))
+        #expect(selection.database == 3)
+    }
+
+    @Test func selectOutsideTransactionAppliesNow() {
+        var selection = RedisSelection(database: 0)
+        track(&selection, "SELECT 4", .simple("OK"))
+        #expect(selection.database == 4)
+        track(&selection, "SELECT 5", .error("ERR DB index is out of range"))
+        #expect(selection.database == 4)
+    }
+}
+
+@Suite struct MongoNumericInputTests {
+    private func decimal(_ text: String) throws -> String? {
+        guard case .decimal128(let bytes) = try MongoShellParser.value(text) else { return nil }
+        return Decimal128.string(bytes)
+    }
+
+    @Test func numberDecimalKeepsFractions() throws {
+        #expect(try decimal("NumberDecimal(12.5)") == "12.5")
+        #expect(try decimal("NumberDecimal(0.1)") == "0.1")
+        #expect(try decimal("NumberDecimal(-1.9)") == "-1.9")
+        #expect(try decimal("NumberDecimal(-0.25)") == "-0.25")
+        #expect(try decimal("NumberDecimal(7)") == "7")
+        #expect(try decimal("NumberDecimal(5000000000)") == "5000000000")
+        #expect(try decimal("NumberDecimal(1e20)") == "1E+20")
+        #expect(try decimal("NumberDecimal(\"12.50\")") == "12.50")
+    }
+
+    @Test func outOfRangeNumbersAreRejectedNotTrapped() {
+        for input in ["NumberLong(1e20)", "NumberLong(1.5)", "NumberInt(1e20)", "Timestamp(-1, 0)", "Timestamp(1, -1)",
+                      "Timestamp(4294967296, 0)", "Timestamp(1, 4294967296)", "Timestamp({ t: -1, i: 0 })",
+                      "NumberDecimal(\"1e9223372036854775807\")", "NumberDecimal(\"1.5e-9223372036854775808\")",
+                      "NumberDecimal(Infinity)", "ISODate(1e300)", "BinData(1e300, \"AA==\")"] {
+            #expect(throws: DatabaseError.self, "\(input)") { try MongoShellParser.value(input) }
+        }
+    }
+
+    @Test func timestampInRange() throws {
+        #expect(try MongoShellParser.value("Timestamp(4294967295, 4294967295)") == .timestamp(UInt64.max))
+        #expect(try MongoShellParser.value("Timestamp({ t: 1, i: 2 })") == .timestamp(1 << 32 | 2))
+    }
+
+    @Test func intAccessorRejectsUnrepresentableDoubles() {
+        #expect(BSONValue.double(3).int == 3)
+        #expect(BSONValue.double(3.5).int == nil)
+        #expect(BSONValue.double(1e20).int == nil)
+        #expect(BSONValue.double(.nan).int == nil)
+        #expect(BSONValue.double(0.5).bool == true)
+    }
+}
+
+@Suite struct MongoWriteCommandTests {
+    private let concern: BSONValue = .document(["w": .int32(2), "wtimeout": .int32(100)])
+
+    private func command(_ statement: String) throws -> BSONDocument {
+        guard case .collection(let collection, let method, let arguments, _) = try MongoShellParser.statement(statement) else {
+            Issue.record("not a collection call")
+            return BSONDocument()
+        }
+        return try MongoDriver.writeCommand(collection, method, arguments)
+    }
+
+    @Test func writeConcernReachesEveryHelper() throws {
+        let statements = [
+            "db.items.insertOne({x: 1}, {writeConcern: {w: 2, wtimeout: 100}})",
+            "db.items.insertMany([{x: 1}], {ordered: false, writeConcern: {w: 2, wtimeout: 100}})",
+            "db.items.updateOne({x: 1}, {$set: {y: 2}}, {writeConcern: {w: 2, wtimeout: 100}})",
+            "db.items.replaceOne({x: 1}, {y: 2}, {writeConcern: {w: 2, wtimeout: 100}})",
+            "db.items.deleteMany({x: 1}, {writeConcern: {w: 2, wtimeout: 100}})",
+            "db.items.remove({x: 1}, {justOne: true, writeConcern: {w: 2, wtimeout: 100}})",
+            "db.items.findOneAndUpdate({x: 1}, {$set: {y: 2}}, {writeConcern: {w: 2, wtimeout: 100}})",
+            "db.items.findOneAndDelete({x: 1}, {writeConcern: {w: 2, wtimeout: 100}})",
+        ]
+        for statement in statements {
+            #expect(try command(statement)["writeConcern"] == concern, "\(statement)")
+        }
+    }
+
+    @Test func statementOptionsStayOnTheStatement() throws {
+        let update = try command("db.items.updateMany({x: 1}, {$set: {y: 2}}, {upsert: true, hint: 'x_1'})")
+        let statement = try #require(update["updates"]?.array?.first?.document)
+        #expect(statement["upsert"] == .bool(true))
+        #expect(statement["hint"] == .string("x_1"))
+        #expect(statement["multi"] == .bool(true))
+        #expect(update["upsert"] == nil)
+
+        let remove = try command("db.items.remove({x: 1}, {justOne: true})")
+        #expect(remove["deletes"]?.array?.first?.document?["limit"] == .int32(1))
+        let insert = try command("db.items.insertMany([{x: 1}], {ordered: false})")
+        #expect(insert["ordered"] == .bool(false))
+    }
+
+    @Test func unsupportedOptionsAreRefused() {
+        for statement in ["db.items.insertOne({x: 1}, {w: 2})",
+                          "db.items.insertOne({x: 1}, {ordered: false})",
+                          "db.items.updateOne({x: 1}, {$set: {y: 2}}, {unknownOption: 1})",
+                          "db.items.deleteOne({x: 1}, {justOne: true})",
+                          "db.items.insertOne({x: 1}, {writeConcern: 2})"] {
+            #expect(throws: DatabaseError.self, "\(statement)") { try command(statement) }
+        }
+    }
+}

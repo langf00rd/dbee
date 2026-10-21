@@ -112,6 +112,28 @@ struct SQLDialect: Sendable {
         }
     }
 
+    /// Like `literal(_:)`, but for a BIT column (see `isBitType`) the unsigned integer the MySQL driver
+    /// displays is written as a number. Quoted, '1' would be stored as the bytes of the text (49 in a BIT(8),
+    /// an error in a BIT(1)). A value that isn't such a number keeps `literal(_:)`.
+    func literal(_ value: CellValue, bit: Bool) -> String {
+        guard bit, let value, value.utf8.allSatisfy({ (0x30...0x39).contains($0) }), let number = UInt64(value) else {
+            return literal(value)
+        }
+        return String(number)
+    }
+
+    /// Whether a column is MySQL/MariaDB BIT(n), which the driver displays as its unsigned integer value.
+    static func isBitType(_ dataType: String, kind: DatabaseKind) -> Bool {
+        guard kind == .mysql else { return false }
+        let type = dataType.lowercased()
+        return type == "bit" || type.hasPrefix("bit(")
+    }
+
+    /// `value` written for `column`, as bytes for a binary column and as a number for a BIT column.
+    private func literal(_ value: CellValue, column: String, binaryColumns: Set<String>, bitColumns: Set<String>) -> String {
+        bitColumns.contains(column) ? literal(value, bit: true) : literal(value, binary: binaryColumns.contains(column))
+    }
+
     /// The hex digits of a "\x…" display value, or nil when `value` isn't one.
     private static func hexDigits(_ value: String) -> String? {
         guard value.hasPrefix("\\x") else { return nil }
@@ -144,32 +166,38 @@ struct SQLDialect: Sendable {
     ///
     /// Precondition: callers pass a non-empty `changes` and a non-empty `key` that identifies the row.
     /// An empty `key` yields `WHERE 1 = 0`, so a caller bug can never rewrite a whole table.
-    /// `binaryColumns` names columns whose "\x…" display values must be written back as bytes (see `literal(_:binary:)`).
+    /// `binaryColumns` names columns whose "\x…" display values must be written back as bytes (see `literal(_:binary:)`),
+    /// `bitColumns` BIT columns whose values are written as numbers (see `literal(_:bit:)`).
     func update(_ table: TableRef, changes: [(String, CellValue)], key: [(String, CellValue)],
-                binaryColumns: Set<String> = []) -> String {
+                binaryColumns: Set<String> = [], bitColumns: Set<String> = []) -> String {
         let assignments = changes
-            .map { quoteIdentifier($0.0) + " = " + literal($0.1, binary: binaryColumns.contains($0.0)) }
+            .map { quoteIdentifier($0.0) + " = " + literal($0.1, column: $0.0, binaryColumns: binaryColumns, bitColumns: bitColumns) }
             .joined(separator: ", ")
-        return "UPDATE " + qualifiedName(table) + " SET " + assignments + keyClause(key, binaryColumns: binaryColumns)
+        return "UPDATE " + qualifiedName(table) + " SET " + assignments
+            + keyClause(key, binaryColumns: binaryColumns, bitColumns: bitColumns)
     }
 
     /// DELETE FROM t WHERE pk1 = '1' AND ...
     ///
     /// Precondition: `key` is non-empty. An empty `key` yields `WHERE 1 = 0`, so a caller bug can
     /// never empty a table.
-    func delete(_ table: TableRef, key: [(String, CellValue)], binaryColumns: Set<String> = []) -> String {
-        "DELETE FROM " + qualifiedName(table) + keyClause(key, binaryColumns: binaryColumns)
+    func delete(_ table: TableRef, key: [(String, CellValue)], binaryColumns: Set<String> = [],
+                bitColumns: Set<String> = []) -> String {
+        "DELETE FROM " + qualifiedName(table) + keyClause(key, binaryColumns: binaryColumns, bitColumns: bitColumns)
     }
 
     /// INSERT INTO t (a, b) VALUES ('x', NULL). With no values: INSERT INTO t DEFAULT VALUES
     /// (MySQL: INSERT INTO t () VALUES ()).
-    func insert(_ table: TableRef, values: [(String, CellValue)], binaryColumns: Set<String> = []) -> String {
+    func insert(_ table: TableRef, values: [(String, CellValue)], binaryColumns: Set<String> = [],
+                bitColumns: Set<String> = []) -> String {
         let target = "INSERT INTO " + qualifiedName(table)
         guard !values.isEmpty else {
             return target + (kind == .mysql ? " () VALUES ()" : " DEFAULT VALUES")
         }
         let columns = values.map { quoteIdentifier($0.0) }.joined(separator: ", ")
-        let literals = values.map { literal($0.1, binary: binaryColumns.contains($0.0)) }.joined(separator: ", ")
+        let literals = values
+            .map { literal($0.1, column: $0.0, binaryColumns: binaryColumns, bitColumns: bitColumns) }
+            .joined(separator: ", ")
         return target + " (" + columns + ") VALUES (" + literals + ")"
     }
 
@@ -235,16 +263,18 @@ struct SQLDialect: Sendable {
 
     /// "a = 'x' AND b IS NULL" (the condition `update`/`delete` target a row with), or "1 = 0" when
     /// `key` is empty.
-    func keyCondition(_ key: [(String, CellValue)], binaryColumns: Set<String> = []) -> String {
+    func keyCondition(_ key: [(String, CellValue)], binaryColumns: Set<String> = [], bitColumns: Set<String> = []) -> String {
         guard !key.isEmpty else { return "1 = 0" }
         return key.map { column, value in
-            quoteIdentifier(column) + (value == nil ? " IS NULL" : " = " + literal(value, binary: binaryColumns.contains(column)))
+            quoteIdentifier(column) + (value == nil
+                ? " IS NULL"
+                : " = " + literal(value, column: column, binaryColumns: binaryColumns, bitColumns: bitColumns))
         }.joined(separator: " AND ")
     }
 
     /// " WHERE a = 'x' AND b IS NULL", or " WHERE 1 = 0" when `key` is empty.
-    private func keyClause(_ key: [(String, CellValue)], binaryColumns: Set<String>) -> String {
-        " WHERE " + keyCondition(key, binaryColumns: binaryColumns)
+    private func keyClause(_ key: [(String, CellValue)], binaryColumns: Set<String>, bitColumns: Set<String>) -> String {
+        " WHERE " + keyCondition(key, binaryColumns: binaryColumns, bitColumns: bitColumns)
     }
 }
 

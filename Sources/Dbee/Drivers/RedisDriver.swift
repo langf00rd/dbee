@@ -34,12 +34,14 @@ final class RedisDriver: CommandDriver, @unchecked Sendable {
     private struct State {
         var connection: WireConnection?
         var credentials: Credentials?
-        var database: Int
+        var selection: RedisSelection
         var version = ""
         /// A command is on the wire, so Stop has something to interrupt.
         var running = false
         var scan: KeyScan?
         var isClosed = false
+
+        var database: Int { selection.database }
     }
 
     private let endpoint: WireConnection.Endpoint
@@ -50,7 +52,7 @@ final class RedisDriver: CommandDriver, @unchecked Sendable {
                  database: Int, version: String) {
         self.endpoint = endpoint
         state = NIOLockedValueBox(State(connection: connection, credentials: credentials,
-                                        database: database, version: version))
+                                        selection: RedisSelection(database: database), version: version))
     }
 
     // MARK: Connecting
@@ -179,6 +181,8 @@ final class RedisDriver: CommandDriver, @unchecked Sendable {
         let replaced = state.withLockedValue { state -> Bool in
             guard !state.isClosed else { return false }
             state.connection = fresh
+            // The server dropped any transaction along with the old connection.
+            state.selection.queued = nil
             return true
         }
         guard replaced else {
@@ -194,6 +198,17 @@ final class RedisDriver: CommandDriver, @unchecked Sendable {
         return reply
     }
 
+    /// Whether the editor left a MULTI open on the connection.
+    private var isInTransactionBlock: Bool { state.withLockedValue { $0.selection.isInTransaction } }
+
+    /// The browser's own commands would be queued into the user's transaction and change what EXEC returns.
+    private func ensureNoTransaction() throws {
+        if isInTransactionBlock {
+            throw DatabaseError("A Redis transaction is open in a query tab.",
+                                detail: "Run EXEC or DISCARD there first.")
+        }
+    }
+
     // MARK: DatabaseDriver
 
     func serverVersion() async throws -> String {
@@ -202,7 +217,9 @@ final class RedisDriver: CommandDriver, @unchecked Sendable {
 
     func listDatabases() async throws -> [String] {
         var count = 16
-        if let reply = try? await send("CONFIG", "GET", "databases"), case .array(let items?) = reply,
+        if isInTransactionBlock {
+            // Probing now would queue CONFIG and INFO into the user's transaction.
+        } else if let reply = try? await send("CONFIG", "GET", "databases"), case .array(let items?) = reply,
            items.count >= 2, let value = items[1].integer {
             count = Int(value)
         } else if let info = try? await send("INFO", "keyspace").string {
@@ -254,15 +271,11 @@ final class RedisDriver: CommandDriver, @unchecked Sendable {
             throw DatabaseError("Dbee doesn't run \(words.prefix(2).joined(separator: " ")) from the editor.",
                                 detail: "It would change the connection under Dbee.")
         }
-        let reply = try Self.checked(try await send([arguments])[0])
-        if name == "SELECT", let index = words.dropFirst().first.flatMap({ Int($0) }) {
-            state.withLockedValue { state in
-                state.database = index
-                state.scan = nil
-            }
-        } else if name == "FLUSHDB" || name == "FLUSHALL" || name == "SWAPDB" {
-            state.withLockedValue { $0.scan = nil }
+        let raw = try await send([arguments])[0]
+        state.withLockedValue { state in
+            if state.selection.track(words, reply: raw) { state.scan = nil }
         }
+        let reply = try Self.checked(raw)
         var result = Self.result(for: words, reply: reply, maxRows: maxRows)
         result.statement = sql
         result.duration = Date().timeIntervalSince(start)
@@ -295,15 +308,17 @@ final class RedisDriver: CommandDriver, @unchecked Sendable {
 
     func useDatabase(_ name: String) async throws {
         guard let index = try Self.databaseIndex(name) else { return }
+        try ensureNoTransaction()
         _ = try Self.checked(try await send("SELECT", String(index)))
         state.withLockedValue { state in
-            state.database = index
+            state.selection.database = index
             state.scan = nil
         }
     }
 
     func page(of table: TableRef, filter: String?, sort: GridSort?, limit: Int, offset: Int) async throws -> QueryResult {
         let start = Date()
+        try ensureNoTransaction()
         let pattern = Self.pattern(filter)
         let database = state.withLockedValue { $0.database }
         var scan = state.withLockedValue { $0.scan }
@@ -330,6 +345,7 @@ final class RedisDriver: CommandDriver, @unchecked Sendable {
     }
 
     func count(of table: TableRef, filter: String?) async throws -> Int? {
+        try ensureNoTransaction()
         let pattern = Self.pattern(filter)
         if pattern == "*" {
             return try Self.checked(try await send("DBSIZE")).integer.map(Int.init)
@@ -504,6 +520,71 @@ final class RedisDriver: CommandDriver, @unchecked Sendable {
             return make(["value"], items.map { [RedisFormatting.cell($0)] })
         default:
             return make(["value"], [[RedisFormatting.cell(reply)]])
+        }
+    }
+}
+
+/// The database a Redis connection has selected, kept in step with the editor's commands. Inside MULTI a
+/// command only answers QUEUED, so a queued SELECT (or FLUSHDB…) takes effect only once EXEC reports it ran;
+/// DISCARD, a failed EXEC and a WATCH abort leave the selection as it was.
+struct RedisSelection: Equatable, Sendable {
+    var database: Int
+    /// Commands queued since MULTI (upper-cased words), or nil outside a transaction.
+    var queued: [[String]]?
+
+    init(database: Int) {
+        self.database = database
+    }
+
+    var isInTransaction: Bool { queued != nil }
+
+    /// Follows `reply` to the command `words`. Returns true when the keys the connection sees may have
+    /// changed (another database selected, or one flushed or swapped), so a cached key scan is stale.
+    mutating func track(_ words: [String], reply: RESPValue) -> Bool {
+        let name = words.first ?? ""
+        if case .error = reply {
+            // A failed EXEC (EXECABORT) and DISCARD both end the transaction; any other failed command isn't queued.
+            if name == "EXEC" || name == "DISCARD" { queued = nil }
+            return false
+        }
+        switch name {
+        case "MULTI":
+            queued = []
+            return false
+        case "DISCARD":
+            queued = nil
+            return false
+        case "EXEC":
+            let commands = queued ?? []
+            queued = nil
+            // A null reply means WATCH aborted the transaction: nothing ran.
+            guard case .array(let results?) = reply else { return false }
+            var changed = false
+            for (command, result) in zip(commands, results) {
+                if case .error = result { continue }
+                if apply(command) { changed = true }
+            }
+            return changed
+        default:
+            if queued != nil {
+                queued?.append(words)
+                return false
+            }
+            return apply(words)
+        }
+    }
+
+    /// Applies a command that ran. Returns true when the visible keys may have changed.
+    private mutating func apply(_ words: [String]) -> Bool {
+        switch words.first {
+        case "SELECT":
+            guard let index = words.dropFirst().first.flatMap({ Int($0) }) else { return false }
+            database = index
+            return true
+        case "FLUSHDB", "FLUSHALL", "SWAPDB":
+            return true
+        default:
+            return false
         }
     }
 }

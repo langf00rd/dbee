@@ -300,6 +300,27 @@ struct MySQLIntegrationTests {
         }
     }
 
+    /// BIT values shown as numbers are written back as numbers: '1' as text would be the byte 49.
+    @Test(arguments: MySQLTestServer.all)
+    func bitColumnsRoundTrip(_ server: MySQLTestServer) async throws {
+        try await server.withDriver { driver in
+            _ = try await driver.execute("DROP TABLE IF EXISTS it_bits", maxRows: 0)
+            _ = try await driver.execute("CREATE TABLE it_bits (id BIT(8) PRIMARY KEY, b1 BIT(1), b8 BIT(8), b64 BIT(64))", maxRows: 0)
+            let dialect = SQLDialect(kind: .mysql)
+            let table = TableRef(schema: nil, name: "it_bits")
+            let bits: Set<String> = ["id", "b1", "b8", "b64"]
+            _ = try await driver.execute(dialect.insert(table, values: [("id", "1"), ("b1", "1"), ("b8", "0"),
+                                                                        ("b64", "18446744073709551615")], bitColumns: bits), maxRows: 0)
+            _ = try await driver.execute(dialect.update(table, changes: [("b8", "200"), ("b1", "0")], key: [("id", "1")],
+                                                        bitColumns: bits), maxRows: 0)
+            let rows = try await driver.execute("SELECT id, b1, b8, b64 FROM it_bits", maxRows: 10).rows
+            #expect(rows == [["1", "0", "200", "18446744073709551615"]])
+            let deleted = try await driver.execute(dialect.delete(table, key: [("id", "1")], bitColumns: bits), maxRows: 0)
+            #expect(deleted.rowsAffected == 1)
+            _ = try await driver.execute("DROP TABLE it_bits", maxRows: 0)
+        }
+    }
+
     @Test(arguments: MySQLTestServer.all)
     func wrongPasswordIsReadable(_ server: MySQLTestServer) async throws {
         do {

@@ -533,6 +533,115 @@ final class MongoDriver: CommandDriver, @unchecked Sendable {
         }
     }
 
+    /// The server command for a shell write helper (insert, update, delete and findOneAnd… methods). Every
+    /// option is either sent where the server reads it or refused, so a safety option such as `writeConcern`
+    /// is never dropped silently. Inserted documents get an `_id` first, like in the shell.
+    static func writeCommand(_ collection: String, _ method: String, _ arguments: [BSONValue]) throws -> BSONDocument {
+        func document(_ index: Int) -> BSONDocument? { arguments.indices.contains(index) ? arguments[index].document : nil }
+        func required(_ index: Int, _ what: String) throws -> BSONDocument {
+            guard let value = document(index) else { throw DatabaseError("\(method)() needs \(what).") }
+            return value
+        }
+        /// Refuses options Dbee wouldn't send, then copies `commandLevel` ones onto the command.
+        func applyOptions(_ options: BSONDocument, allowed: Set<String>, commandLevel: [String],
+                          to command: inout BSONDocument) throws {
+            if let unknown = options.keys.first(where: { !allowed.contains($0) }) {
+                throw DatabaseError("Dbee doesn't support the \(unknown) option of \(method)().",
+                                    detail: "Use db.runCommand({ … }) to send the server command with it.")
+            }
+            if let concern = options["writeConcern"], concern.document == nil {
+                throw DatabaseError("writeConcern needs a document, such as { w: \"majority\" }.")
+            }
+            for key in commandLevel { if let value = options[key] { command[key] = value } }
+        }
+        let name = BSONValue.string(collection)
+        let commandOptions = ["writeConcern", "comment", "let", "bypassDocumentValidation"]
+
+        switch method {
+        case "insertOne", "insert", "insertMany":
+            var documents: [BSONDocument]
+            if method == "insertMany" || (method == "insert" && arguments.first?.array != nil) {
+                guard let items = arguments.first?.array else { throw DatabaseError("insertMany() needs an array of documents.") }
+                documents = try items.map {
+                    guard let document = $0.document else { throw DatabaseError("insertMany() needs an array of documents.") }
+                    return document
+                }
+            } else {
+                documents = [try required(0, "a document")]
+            }
+            // Like the shell, give every document an _id first so the result can report it.
+            for index in documents.indices where documents[index]["_id"] == nil {
+                documents[index].fields.insert((key: "_id", value: .objectId(ObjectIdGenerator.next())), at: 0)
+            }
+            var command: BSONDocument = ["insert": name, "documents": .array(documents.map { .document($0) })]
+            let keys = ["ordered", "writeConcern", "comment", "bypassDocumentValidation"]
+            try applyOptions(document(1) ?? BSONDocument(), allowed: Set(method == "insertOne" ? Array(keys.dropFirst()) : keys),
+                             commandLevel: keys, to: &command)
+            return command
+        case "updateOne", "updateMany", "replaceOne", "update":
+            let filter = try required(0, "a filter")
+            guard arguments.count > 1 else { throw DatabaseError("\(method)() needs an update.") }
+            let update = arguments[1]
+            let options = document(2) ?? BSONDocument()
+            if method == "replaceOne", let replacement = update.document, replacement.keys.contains(where: { $0.hasPrefix("$") }) {
+                throw DatabaseError("replaceOne() takes a whole document, without update operators.")
+            }
+            if method != "replaceOne", let operators = update.document, !operators.isEmpty,
+               !operators.keys.allSatisfy({ $0.hasPrefix("$") }) {
+                throw DatabaseError("\(method)() needs update operators such as { $set: { … } }.",
+                                    detail: "Use replaceOne() to replace a whole document.")
+            }
+            var statement: BSONDocument = ["q": .document(filter), "u": update,
+                                            "multi": .bool(method == "updateMany" || (method == "update" && options["multi"]?.bool == true))]
+            let statementOptions = method == "replaceOne" ? ["upsert", "collation", "hint"] : ["upsert", "arrayFilters", "collation", "hint"]
+            for option in statementOptions where options[option] != nil {
+                statement[option] = options[option]
+            }
+            var command: BSONDocument = ["update": name, "updates": .array([.document(statement)])]
+            let allowed = Set(statementOptions + commandOptions + (method == "update" ? ["multi"] : []))
+            try applyOptions(options, allowed: allowed, commandLevel: commandOptions, to: &command)
+            return command
+        case "deleteOne", "deleteMany", "remove":
+            let filter = try required(0, "a filter")
+            // remove(filter, true) or remove(filter, { justOne: true, … }).
+            let options = document(1) ?? BSONDocument()
+            let justOne = method == "deleteOne"
+                || (method == "remove" && ((arguments.count > 1 && arguments[1].bool == true) || options["justOne"]?.bool == true))
+            var statement: BSONDocument = ["q": .document(filter), "limit": .int32(justOne ? 1 : 0)]
+            for option in ["collation", "hint"] where options[option] != nil {
+                statement[option] = options[option]
+            }
+            var command: BSONDocument = ["delete": name, "deletes": .array([.document(statement)])]
+            let allowed = Set(["collation", "hint", "writeConcern", "comment", "let"] + (method == "remove" ? ["justOne"] : []))
+            try applyOptions(options, allowed: allowed, commandLevel: ["writeConcern", "comment", "let"], to: &command)
+            return command
+        case "findOneAndUpdate", "findOneAndReplace", "findOneAndDelete":
+            let filter = try required(0, "a filter")
+            let options = document(method == "findOneAndDelete" ? 1 : 2) ?? BSONDocument()
+            var command: BSONDocument = ["findAndModify": name, "query": .document(filter)]
+            var allowed: Set<String> = ["sort", "projection", "writeConcern", "collation", "hint", "maxTimeMS", "let", "comment"]
+            if method == "findOneAndDelete" {
+                command["remove"] = .bool(true)
+            } else {
+                guard arguments.count > 1 else { throw DatabaseError("\(method)() needs an update.") }
+                command["update"] = arguments[1]
+                command["new"] = .bool(options["returnDocument"]?.string == "after" || options["returnNewDocument"]?.bool == true)
+                if let upsert = options["upsert"] { command["upsert"] = upsert }
+                allowed.formUnion(["upsert", "returnDocument", "returnNewDocument", "bypassDocumentValidation"])
+                if method == "findOneAndUpdate" { allowed.insert("arrayFilters") }
+            }
+            if let sort = options["sort"] { command["sort"] = sort }
+            if let projection = options["projection"] { command["fields"] = projection }
+            try applyOptions(options, allowed: allowed,
+                             commandLevel: ["writeConcern", "collation", "arrayFilters", "hint", "maxTimeMS", "let",
+                                            "comment", "bypassDocumentValidation"],
+                             to: &command)
+            return command
+        default:
+            throw DatabaseError("\(method)() isn't a write helper.")
+        }
+    }
+
     private func runCollectionMethod(_ collection: String, _ method: String, _ arguments: [BSONValue],
                                      chain: [MongoCall], maxRows: Int) async throws -> QueryResult {
         func document(_ index: Int) -> BSONDocument? { arguments.indices.contains(index) ? arguments[index].document : nil }
@@ -560,7 +669,8 @@ final class MongoDriver: CommandDriver, @unchecked Sendable {
             if let maxTime = chained["maxTimeMS"]?.first { command["maxTimeMS"] = maxTime }
             if let collation = chained["collation"]?.first { command["collation"] = collation }
             if let comment = chained["comment"]?.first { command["comment"] = comment }
-            var limit = method == "findOne" ? 1 : chained["limit"]?.first?.int.map(abs) ?? 0
+            // A negative limit means the same number of documents; Int.min has no positive counterpart.
+            var limit = method == "findOne" ? 1 : chained["limit"]?.first?.int.map { $0 == .min ? .max : abs($0) } ?? 0
             if limit > 0 { command["limit"] = .int64(Int64(limit)) }
             if chained["count"] != nil {
                 return try await count(collection, filter: document(0) ?? BSONDocument(), skip: command["skip"], limit: command["limit"])
@@ -598,45 +708,14 @@ final class MongoDriver: CommandDriver, @unchecked Sendable {
             let reply = try Self.check(try await run(command))
             return Self.table([key], (reply["values"]?.array ?? []).map { [BSONFormatting.cell($0)] }, maxRows: maxRows)
         case "insertOne", "insert", "insertMany":
-            var documents: [BSONDocument]
-            if method == "insertMany" || (method == "insert" && arguments.first?.array != nil) {
-                guard let items = arguments.first?.array else { throw DatabaseError("insertMany() needs an array of documents.") }
-                documents = try items.map {
-                    guard let document = $0.document else { throw DatabaseError("insertMany() needs an array of documents.") }
-                    return document
-                }
-            } else {
-                documents = [try required(0, "a document")]
-            }
-            // Like the shell, give every document an _id first so the result can report it.
-            for index in documents.indices where documents[index]["_id"] == nil {
-                documents[index].fields.insert((key: "_id", value: .objectId(ObjectIdGenerator.next())), at: 0)
-            }
-            var command: BSONDocument = ["insert": name, "documents": .array(documents.map { .document($0) })]
-            if let ordered = document(1)?["ordered"] { command["ordered"] = ordered }
+            let command = try Self.writeCommand(collection, method, arguments)
             let reply = try Self.check(try await run(command))
+            let documents = (command["documents"]?.array ?? []).compactMap(\.document)
             var result = Self.table(["insertedId"], documents.map { [$0["_id"].flatMap(BSONFormatting.cell)] }, maxRows: maxRows)
             result.rowsAffected = reply["n"]?.int
             return result
         case "updateOne", "updateMany", "replaceOne", "update":
-            let filter = try required(0, "a filter")
-            guard arguments.count > 1 else { throw DatabaseError("\(method)() needs an update.") }
-            let update = arguments[1]
-            let options = document(2) ?? BSONDocument()
-            if method == "replaceOne", let replacement = update.document, replacement.keys.contains(where: { $0.hasPrefix("$") }) {
-                throw DatabaseError("replaceOne() takes a whole document, without update operators.")
-            }
-            if method != "replaceOne", let operators = update.document, !operators.isEmpty,
-               !operators.keys.allSatisfy({ $0.hasPrefix("$") }) {
-                throw DatabaseError("\(method)() needs update operators such as { $set: { … } }.",
-                                    detail: "Use replaceOne() to replace a whole document.")
-            }
-            var statement: BSONDocument = ["q": .document(filter), "u": update,
-                                            "multi": .bool(method == "updateMany" || (method == "update" && options["multi"]?.bool == true))]
-            for option in ["upsert", "arrayFilters", "collation", "hint"] where options[option] != nil {
-                statement[option] = options[option]
-            }
-            let reply = try Self.check(try await run(["update": name, "updates": .array([.document(statement)])]))
+            let reply = try Self.check(try await run(try Self.writeCommand(collection, method, arguments)))
             let upserted = (reply["upserted"]?.array ?? []).compactMap { $0.document?["_id"] }
             var result = upserted.isEmpty
                 ? Self.message()
@@ -645,29 +724,12 @@ final class MongoDriver: CommandDriver, @unchecked Sendable {
             result.rowsMatched = reply["n"]?.int
             return result
         case "deleteOne", "deleteMany", "remove":
-            let filter = try required(0, "a filter")
-            let justOne = method == "deleteOne" || (method == "remove" && (arguments.count > 1 && arguments[1].bool == true))
-            var statement: BSONDocument = ["q": .document(filter), "limit": .int32(justOne ? 1 : 0)]
-            if let collation = document(1)?["collation"] { statement["collation"] = collation }
-            let reply = try Self.check(try await run(["delete": name, "deletes": .array([.document(statement)])]))
+            let reply = try Self.check(try await run(try Self.writeCommand(collection, method, arguments)))
             var result = Self.message()
             result.rowsAffected = reply["n"]?.int
             return result
         case "findOneAndUpdate", "findOneAndReplace", "findOneAndDelete":
-            let filter = try required(0, "a filter")
-            let options = document(method == "findOneAndDelete" ? 1 : 2) ?? BSONDocument()
-            var command: BSONDocument = ["findAndModify": name, "query": .document(filter)]
-            if method == "findOneAndDelete" {
-                command["remove"] = .bool(true)
-            } else {
-                guard arguments.count > 1 else { throw DatabaseError("\(method)() needs an update.") }
-                command["update"] = arguments[1]
-                command["new"] = .bool(options["returnDocument"]?.string == "after" || options["returnNewDocument"]?.bool == true)
-                if let upsert = options["upsert"] { command["upsert"] = upsert }
-            }
-            if let sort = options["sort"] { command["sort"] = sort }
-            if let projection = options["projection"] { command["fields"] = projection }
-            let reply = try Self.check(try await run(command))
+            let reply = try Self.check(try await run(try Self.writeCommand(collection, method, arguments)))
             let value = reply["value"]?.document
             return Self.grid(value.map { [$0] } ?? [], maxRows: maxRows)
         case "drop":

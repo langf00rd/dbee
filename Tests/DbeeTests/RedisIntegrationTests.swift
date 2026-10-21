@@ -65,6 +65,26 @@ struct RedisIntegrationTests {
         }
     }
 
+    /// A SELECT inside MULTI only takes effect when EXEC runs it.
+    @Test func selectInsideTransactionFollowsExec() async throws {
+        try await RedisIT.withDriver { driver in
+            _ = try await driver.execute("MULTI", maxRows: 1)
+            _ = try await driver.execute("SELECT 14", maxRows: 1)
+            #expect(try await driver.currentDatabase() == "db15")
+            _ = try await driver.execute("DISCARD", maxRows: 1)
+            #expect(try await driver.currentDatabase() == "db15")
+            _ = try await driver.execute("SET marker discarded", maxRows: 1)
+            #expect(try await driver.execute("GET marker", maxRows: 1).rows == [["discarded"]])
+
+            _ = try await driver.execute("MULTI", maxRows: 1)
+            _ = try await driver.execute("SELECT 14", maxRows: 1)
+            _ = try await driver.execute("EXEC", maxRows: 10)
+            #expect(try await driver.currentDatabase() == "db14")
+            #expect(try await driver.execute("GET marker", maxRows: 1).rows == [[nil]])
+            try await driver.useDatabase("15")
+        }
+    }
+
     @Test func runsCommands() async throws {
         try await RedisIT.withDriver { driver in
             let set = try await driver.execute(#"SET greeting "hello world""#, maxRows: 10)

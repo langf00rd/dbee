@@ -397,7 +397,7 @@ struct MongoShellParser {
             return .date(milliseconds)
         case "NumberLong", "Long":
             if case .string(let text)? = arguments.first, let value = Int64(text) { return .int64(value) }
-            guard let value = arguments.first?.int else { throw error("\(word)() needs a number") }
+            guard let value = arguments.first?.int else { throw error("\(word)() needs a whole 64-bit number") }
             return .int64(Int64(value))
         case "NumberInt", "Int32":
             if case .string(let text)? = arguments.first, let value = Int32(text) { return .int32(value) }
@@ -408,23 +408,30 @@ struct MongoShellParser {
             guard let value = arguments.first?.int else { throw error("Double() needs a number") }
             return .double(Double(value))
         case "NumberDecimal", "Decimal128":
+            // Each numeric type is converted on its own, so a fraction is never cut to an integer.
             let text: String
             switch arguments.first {
             case .string(let value)?: text = value
-            case let value? where value.int != nil: text = String(value.int!)
             case .double(let value)?: text = String(value)
+            case .int32(let value)?: text = String(value)
+            case .int64(let value)?: text = String(value)
             default: throw error("\(word)() needs a number")
             }
             guard let bytes = Decimal128.bytes(text) else { throw error("Couldn't read the decimal “\(text)”") }
             return .decimal128(bytes)
         case "Timestamp":
+            var parts: (time: Int, increment: Int)?
             if arguments.count == 2, let t = arguments[0].int, let increment = arguments[1].int {
-                return .timestamp(UInt64(t) << 32 | UInt64(UInt32(truncatingIfNeeded: increment)))
+                parts = (t, increment)
+            } else if case .document(let document)? = arguments.first, let t = document["t"]?.int, let increment = document["i"]?.int {
+                parts = (t, increment)
             }
-            if case .document(let document)? = arguments.first, let t = document["t"]?.int, let increment = document["i"]?.int {
-                return .timestamp(UInt64(t) << 32 | UInt64(UInt32(truncatingIfNeeded: increment)))
+            guard let parts else { throw error("Timestamp() needs a time and an increment") }
+            // Both halves are unsigned 32-bit numbers.
+            guard let time = UInt32(exactly: parts.time), let increment = UInt32(exactly: parts.increment) else {
+                throw error("Timestamp() needs a time and an increment from 0 to 4294967295")
             }
-            throw error("Timestamp() needs a time and an increment")
+            return .timestamp(UInt64(time) << 32 | UInt64(increment))
         case "BinData":
             guard arguments.count == 2, let subtype = arguments[0].int, case .string(let base64) = arguments[1],
                   let data = Data(base64Encoded: base64) else { throw error("BinData() needs a subtype and base64 text") }

@@ -244,12 +244,16 @@ final class SQLiteDriver: DatabaseDriver, @unchecked Sendable {
         guard let stmt = try prepareFirst(sql, on: db) else {
             return QueryResult(statement: sql, columns: [], rows: [], rowsAffected: nil, duration: elapsed(since: start))
         }
-        defer { sqlite3_finalize(stmt) }
+        var finalized = false
+        defer { if !finalized { sqlite3_finalize(stmt) } }
 
         let columnCount = Int(sqlite3_column_count(stmt))
         let columns = (0..<columnCount).map { i in
             sqlite3_column_name(stmt, Int32(i)).map { String(cString: $0) } ?? "?column?"
         }
+        // A write (e.g. INSERT … RETURNING) only commits, and can still fail on a deferred constraint,
+        // once it is stepped to the end; only a read-only statement may stop at the row limit.
+        let readOnly = sqlite3_stmt_readonly(stmt) != 0
         var rows: [[CellValue]] = []
         var truncated = false
         while true {
@@ -258,10 +262,13 @@ final class SQLiteDriver: DatabaseDriver, @unchecked Sendable {
             guard rc == SQLITE_ROW else { throw lastError(db) }
             if rows.count >= limit {
                 truncated = true
-                break
+                if readOnly { break }
+                continue
             }
             rows.append(readRow(stmt, columnCount: columnCount))
         }
+        finalized = true
+        guard sqlite3_finalize(stmt) == SQLITE_OK else { throw lastError(db) }
 
         // sqlite3_changes keeps the count of the last INSERT/UPDATE/DELETE, so only report it for DML.
         var rowsAffected: Int?

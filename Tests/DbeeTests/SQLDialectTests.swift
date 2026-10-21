@@ -366,3 +366,34 @@ private final class DialectTestDatabase {
         return result
     }
 }
+
+@Suite struct SQLDialectBitTests {
+    private let my = SQLDialect(kind: .mysql)
+    private let table = TableRef(schema: nil, name: "t")
+
+    @Test func bitColumnsAreWrittenAsNumbers() {
+        #expect(my.update(table, changes: [("flag", "1")], key: [("id", "1")], bitColumns: ["flag"])
+            == "UPDATE `t` SET `flag` = 1 WHERE `id` = '1'")
+        #expect(my.insert(table, values: [("id", "2"), ("mask", "255")], bitColumns: ["mask"])
+            == "INSERT INTO `t` (`id`, `mask`) VALUES ('2', 255)")
+        #expect(my.delete(table, key: [("bits", "18446744073709551615")], bitColumns: ["bits"])
+            == "DELETE FROM `t` WHERE `bits` = 18446744073709551615")
+        #expect(my.keyCondition([("bits", "0")], bitColumns: ["bits"]) == "`bits` = 0")
+        #expect(my.literal(nil, bit: true) == "NULL")
+    }
+
+    @Test func nonNumericBitInputStaysQuoted() {
+        #expect(my.literal("abc", bit: true) == "'abc'")
+        #expect(my.literal("-1", bit: true) == "'-1'")
+        #expect(my.literal("1; DROP TABLE t", bit: true) == "'1; DROP TABLE t'")
+        #expect(my.literal("18446744073709551616", bit: true) == "'18446744073709551616'")
+    }
+
+    @Test func detectsBitTypes() {
+        #expect(SQLDialect.isBitType("bit(1)", kind: .mysql))
+        #expect(SQLDialect.isBitType("BIT(64)", kind: .mysql))
+        #expect(SQLDialect.isBitType("bit", kind: .mysql))
+        #expect(!SQLDialect.isBitType("bigint", kind: .mysql))
+        #expect(!SQLDialect.isBitType("bit(1)", kind: .postgres))
+    }
+}

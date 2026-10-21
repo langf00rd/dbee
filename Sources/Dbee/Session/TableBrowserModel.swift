@@ -348,13 +348,16 @@ final class TableBrowserModel {
         }
         let column = dialect.quoteIdentifier(draft.column)
         let value = draft.value
+        // A BIT column compares with the number it shows, not with that number's text.
+        let isBit = type.map { SQLDialect.isBitType($0, kind: dialect.kind) } ?? false
+        let literal = dialect.literal(value, bit: isBit)
         switch draft.op {
-        case .equal: return "\(column) = \(dialect.literal(value))"
-        case .notEqual: return "\(column) <> \(dialect.literal(value))"
-        case .less: return "\(column) < \(dialect.literal(value))"
-        case .greater: return "\(column) > \(dialect.literal(value))"
-        case .lessOrEqual: return "\(column) <= \(dialect.literal(value))"
-        case .greaterOrEqual: return "\(column) >= \(dialect.literal(value))"
+        case .equal: return "\(column) = \(literal)"
+        case .notEqual: return "\(column) <> \(literal)"
+        case .less: return "\(column) < \(literal)"
+        case .greater: return "\(column) > \(literal)"
+        case .lessOrEqual: return "\(column) <= \(literal)"
+        case .greaterOrEqual: return "\(column) >= \(literal)"
         case .like, .notLike:
             // Postgres and ClickHouse have no LIKE for non-text types, so compare the text form.
             let subject = switch dialect.kind {
@@ -650,11 +653,12 @@ final class TableBrowserModel {
     private func pendingChanges() -> [PendingStatement] {
         guard let keyIndices = primaryKeyIndices else { return [] }
         let binary = binaryColumns
+        let bits = bitColumns
         var statements: [PendingStatement] = []
 
         for row in deletedRows.sorted() where row < rows.count {
             statements.append(PendingStatement(
-                sql: dialect.delete(table, key: key(for: row, keyIndices: keyIndices), binaryColumns: binary)))
+                sql: dialect.delete(table, key: key(for: row, keyIndices: keyIndices), binaryColumns: binary, bitColumns: bits)))
         }
 
         let editsByRow = Dictionary(grouping: edits, by: { $0.key.row })
@@ -664,13 +668,13 @@ final class TableBrowserModel {
                 .map { (columns[$0.key.column], $0.value) }
             let key = key(for: row, keyIndices: keyIndices)
             statements.append(PendingStatement(
-                sql: dialect.update(table, changes: changes, key: key, binaryColumns: binary),
-                keyCondition: dialect.keyCondition(key, binaryColumns: binary)))
+                sql: dialect.update(table, changes: changes, key: key, binaryColumns: binary, bitColumns: bits),
+                keyCondition: dialect.keyCondition(key, binaryColumns: binary, bitColumns: bits)))
         }
 
         for inserted in insertedRows {
             let values = inserted.setColumns.sorted().map { (columns[$0], inserted.values[$0]) }
-            statements.append(PendingStatement(sql: dialect.insert(table, values: values, binaryColumns: binary)))
+            statements.append(PendingStatement(sql: dialect.insert(table, values: values, binaryColumns: binary, bitColumns: bits)))
         }
         return statements
     }
@@ -679,6 +683,12 @@ final class TableBrowserModel {
     private var binaryColumns: Set<String> {
         let kind = dialect.kind
         return Set(structure?.columns.filter { SQLDialect.isBinaryType($0.dataType, kind: kind) }.map(\.name) ?? [])
+    }
+
+    /// MySQL BIT columns, whose cells show a number that must be written back as a number, not as text.
+    private var bitColumns: Set<String> {
+        let kind = dialect.kind
+        return Set(structure?.columns.filter { SQLDialect.isBitType($0.dataType, kind: kind) }.map(\.name) ?? [])
     }
 
     /// Key columns with the row's ORIGINAL values, so editing a key column still targets the right row.

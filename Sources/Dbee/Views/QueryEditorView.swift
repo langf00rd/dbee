@@ -70,7 +70,7 @@ private struct QueryWorkspace: View {
             .disabled(!canRun)
 
             Button {
-                QueryRunner.stop(tab, session: session)
+                session.stopRun(in: tab)
             } label: {
                 Label("Stop", systemImage: "stop.fill")
             }
@@ -119,11 +119,8 @@ private struct QueryWorkspace: View {
             }
         }
         guard !sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let session = session
-        let tab = tab
-        QueryRunner.start(tab, statementCount: SQLSplitter.split(sql, kind: session.kind).count) {
-            await session.run(sql, in: tab, baseOffset: baseOffset)
-        }
+        QueryRunner.remember(tab, statementCount: SQLSplitter.split(sql, kind: session.kind).count)
+        session.startRun(sql, in: tab, baseOffset: baseOffset)
     }
 }
 
@@ -148,30 +145,16 @@ private final class EditorSelection {
     }
 }
 
-/// Keeps each tab's running task reachable so Stop works even after the view was recreated, and
-/// remembers how many statements the tab's last run had (for "Statement 3 of 5 failed").
+/// Remembers how many statements each tab's last run had (for "Statement 3 of 5 failed"). The running
+/// task itself belongs to the session, so Stop and closing the tab reach it.
 @MainActor
 private enum QueryRunner {
-    private static var tasks: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
     private static var statementCounts: [UUID: Int] = [:]
 
     static func statementCount(of tab: QueryTab) -> Int? { statementCounts[tab.id] }
 
-    static func start(_ tab: QueryTab, statementCount: Int, _ work: @escaping @MainActor () async -> Void) {
-        let id = tab.id
-        statementCounts[id] = statementCount
-        let token = UUID()
-        let task = Task { @MainActor in
-            await work()
-            if tasks[id]?.token == token { tasks[id] = nil }
-        }
-        tasks[id] = (token, task)
-    }
-
-    static func stop(_ tab: QueryTab, session: DatabaseSession) {
-        tasks[tab.id]?.task.cancel()
-        // Only this tab's own statement: another tab's query or a table load keeps running.
-        Task { await session.cancelRunningQuery(in: tab) }
+    static func remember(_ tab: QueryTab, statementCount: Int) {
+        statementCounts[tab.id] = statementCount
     }
 }
 

@@ -88,6 +88,12 @@ final class DatabaseSession {
 
     /// Serializes use of the connection across statements; see `withExclusiveConnection`.
     @ObservationIgnored private let lease = ConnectionLease()
+    /// Bumped whenever the connection is replaced or closed, or its current database changes. Work captures
+    /// it when submitted and is refused if it changed before the work got the connection, so a statement
+    /// queued for one database never runs on another; see `withLease`.
+    @ObservationIgnored private var contextEpoch = 0
+    /// Each query tab's running script, so Stop and closing the tab reach it; see `startRun`.
+    @ObservationIgnored private var queryTasks: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
     /// The query tab whose statement holds the lease, so Stop only interrupts that tab's own statement.
     @ObservationIgnored private var leaseOwner: UUID?
     /// Whether a query tab left a transaction open (BEGIN without COMMIT/ROLLBACK). Only consulted when
@@ -179,6 +185,7 @@ final class DatabaseSession {
 
             self.tunnel = openedTunnel
             self.driver = driver
+            contextEpoch += 1
             self.config = newConfig
             userTransactionOpen = false
             if let tunnel = openedTunnel {
@@ -278,6 +285,9 @@ final class DatabaseSession {
         let tunnel = self.tunnel
         self.driver = nil
         self.tunnel = nil
+        contextEpoch += 1
+        // Their statements were meant for this connection; anything not yet sent must not reach the next one.
+        for (_, entry) in queryTasks { entry.task.cancel() }
         await driver?.close()
         await tunnel?.close()
     }
@@ -290,7 +300,11 @@ final class DatabaseSession {
         switch config.kind {
         case .mysql, .clickhouse:
             do {
-                _ = try await execute("USE \(dialect.quoteIdentifier(name))", recordHistory: false)
+                let use = "USE \(dialect.quoteIdentifier(name))"
+                try await withLease { driver in
+                    _ = try await driver.execute(use, maxRows: 0)
+                    contextEpoch += 1
+                }
                 currentDatabase = name
                 self.config?.database = name
                 databaseDidChange()
@@ -305,6 +319,7 @@ final class DatabaseSession {
                 try await withLease { driver in
                     guard let driver = driver as? any CommandDriver else { return }
                     try await driver.useDatabase(name)
+                    contextEpoch += 1
                 }
                 currentDatabase = (try? await withLease { try await $0.currentDatabase() }) ?? name
                 self.config?.database = currentDatabase
@@ -352,6 +367,7 @@ final class DatabaseSession {
         }
         let oldDriver = driver
         driver = newDriver
+        contextEpoch += 1
         userTransactionOpen = false
         lease.release()
         await oldDriver?.close()
@@ -370,10 +386,10 @@ final class DatabaseSession {
         selection = selection.flatMap { if case .query = $0 { $0 } else { nil } }
     }
 
-    /// Re-reads the connection's current database after a statement that may have changed it (MySQL `USE`
-    /// and `DROP DATABASE`, Redis `SELECT`, MongoDB `use`), so the sidebar, picker and table browser follow.
-    private func syncCurrentDatabase() async {
-        guard let name = try? await withLease({ try await $0.currentDatabase() }), name != currentDatabase else { return }
+    /// Follows a query tab statement that changed the connection's current database (MySQL `USE` and
+    /// `DROP DATABASE`, Redis `SELECT`, MongoDB `use`), so the sidebar, picker and table browser follow.
+    private func adoptCurrentDatabase(_ name: String) async {
+        guard name != currentDatabase else { return }
         currentDatabase = name
         config?.database = name
         databaseDidChange()
@@ -473,10 +489,18 @@ final class DatabaseSession {
 
     /// Runs `body` with the connection to itself for one operation. Every statement the session sends goes
     /// through here, in FIFO order; `owner` names the query tab the statement belongs to, if any.
-    private func withLease<T>(owner: UUID? = nil, _ body: (any DatabaseDriver) async throws -> T) async throws -> T {
+    /// The work is bound to the connection and database current when it was submitted (or to `epoch`,
+    /// for a script's later statements): if either changed while it waited, it fails without sending anything.
+    private func withLease<T>(owner: UUID? = nil, epoch: Int? = nil,
+                              _ body: (any DatabaseDriver) async throws -> T) async throws -> T {
+        let submitted = epoch ?? contextEpoch
         try await lease.acquire()
         defer { lease.release() }
         guard let driver else { throw DatabaseError("Not connected") }
+        guard submitted == contextEpoch else {
+            throw DatabaseError("The connection changed before this statement ran, so it wasn’t sent.",
+                                detail: "Run it again if it should go to the current database.")
+        }
         leaseOwner = owner
         defer { leaseOwner = nil }
         return try await body(driver)
@@ -510,6 +534,32 @@ final class DatabaseSession {
             return result
         } catch {
             if recordHistory { record(sql, duration: Date().timeIntervalSince(start), succeeded: false) }
+            throw error
+        }
+    }
+
+    /// One statement of a query tab's script, refused if the connection context moved off `epoch`. When the
+    /// statement itself switched the database, that is detected while still holding the connection and the
+    /// new epoch and database are returned, so the script's next statements follow its own switch while
+    /// work other callers queued for the old database is refused.
+    private func executeScriptStatement(_ sql: String, owner: UUID, epoch: Int)
+        async throws -> (result: QueryResult, epoch: Int, database: String?) {
+        let start = Date()
+        let limit = settings.maxQueryRows
+        let followsDatabase = Self.mayChangeDatabase(sql, kind: kind)
+        do {
+            let outcome = try await withLease(owner: owner, epoch: epoch) { driver -> (QueryResult, Int, String?) in
+                let result = try await driver.execute(sql, maxRows: limit)
+                guard followsDatabase, let name = try? await driver.currentDatabase(), name != currentDatabase else {
+                    return (result, epoch, nil)
+                }
+                contextEpoch += 1
+                return (result, contextEpoch, name)
+            }
+            record(sql, duration: outcome.0.duration, succeeded: true)
+            return outcome
+        } catch {
+            record(sql, duration: Date().timeIntervalSince(start), succeeded: false)
             throw error
         }
     }
@@ -554,8 +604,29 @@ final class DatabaseSession {
         }
     }
 
+    /// Starts running `sql` in `tab` as a task the session owns, so Stop and closing the tab can reach it.
+    func startRun(_ sql: String, in tab: QueryTab, baseOffset: Int = 0) {
+        let id = tab.id
+        let token = UUID()
+        let task = Task { @MainActor in
+            await run(sql, in: tab, baseOffset: baseOffset)
+            if queryTasks[id]?.token == token { queryTasks[id] = nil }
+        }
+        queryTasks[id] = (token, task)
+    }
+
+    /// Stops `tab`'s script: statements still waiting for the connection are dropped, and the one on the
+    /// connection is interrupted if it is this tab's. Another tab's query or a table load keeps running.
+    func stopRun(in tab: QueryTab) {
+        queryTasks[tab.id]?.task.cancel()
+        if leaseOwner == tab.id, let driver {
+            Task { await driver.cancelCurrentQuery() }
+        }
+    }
+
     /// Splits `sql` into statements and runs them one after another in `tab`, stopping at the first error.
     /// `baseOffset` is the UTF-16 offset of `sql` within the tab's full text (for error highlighting).
+    /// Every statement must reach the connection and database the script started on (or switched to itself).
     func run(_ sql: String, in tab: QueryTab, baseOffset: Int = 0) async {
         guard !tab.isRunning else { return }
         let statements = SQLSplitter.split(sql, kind: kind)
@@ -565,14 +636,19 @@ final class DatabaseSession {
         tab.failedStatementRange = nil
         var results: [QueryResult] = []
         var schemaMayHaveChanged = false
+        var epoch = contextEpoch
         for statement in statements {
-            if Task.isCancelled { break }
+            // A closed tab has no Stop button or results left, so its remaining statements don't run.
+            if Task.isCancelled || !queryTabs.contains(where: { $0 === tab }) { break }
             do {
-                let result = try await execute(statement.text, maxRows: nil, recordHistory: true, owner: tab.id)
-                results.append(result)
+                let outcome = try await executeScriptStatement(statement.text, owner: tab.id, epoch: epoch)
+                results.append(outcome.result)
                 if Self.isSchemaChanging(statement.text, kind: kind) { schemaMayHaveChanged = true }
                 trackTransaction(statement.text)
-                if Self.mayChangeDatabase(statement.text, kind: kind) { await syncCurrentDatabase() }
+                if let database = outcome.database {
+                    epoch = outcome.epoch
+                    await adoptCurrentDatabase(database)
+                }
             } catch {
                 tab.errorMessage = error is CancellationError || Task.isCancelled ? "Query stopped" : Self.describe(error)
                 tab.failedStatementRange = NSRange(location: statement.range.location + baseOffset, length: statement.range.length)
@@ -653,7 +729,9 @@ final class DatabaseSession {
         return tab
     }
 
+    /// Closing a running tab stops it: its Stop button and results go away with it.
     func closeQueryTab(_ id: UUID) {
+        if let tab = queryTab(id) { stopRun(in: tab) }
         queryTabs.removeAll { $0.id == id }
         if selection == .query(id) {
             selection = queryTabs.last.map { .query($0.id) }
@@ -708,7 +786,8 @@ final class DatabaseSession {
         case .scylla:
             return words.first == "USE" || words == ["DROP", "KEYSPACE"]
         case .redis:
-            return words.first == "SELECT"
+            // EXEC runs a SELECT queued inside MULTI.
+            return words.first == "SELECT" || words.first == "EXEC"
         case .mongodb:
             return words.first == "USE" || sql.contains("dropDatabase")
         case .postgres, .sqlite, .meilisearch:

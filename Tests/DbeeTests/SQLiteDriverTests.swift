@@ -4,6 +4,40 @@ import Testing
 
 @Suite("SQLiteDriver")
 struct SQLiteDriverTests {
+    // MARK: Writes past the row limit
+
+    /// A write is stepped to the end even past the row limit, so a deferred constraint that fails at
+    /// completion is reported instead of a successful, truncated RETURNING result.
+    @Test func truncatedReturningSurfacesDeferredFailure() async throws {
+        try await withDatabase { driver, _ in
+            _ = try await driver.execute("PRAGMA foreign_keys = ON", maxRows: 0)
+            _ = try await driver.execute("CREATE TABLE parent(id INTEGER PRIMARY KEY)", maxRows: 0)
+            _ = try await driver.execute("CREATE TABLE child(p REFERENCES parent DEFERRABLE INITIALLY DEFERRED)", maxRows: 0)
+            await #expect(throws: DatabaseError.self) {
+                try await driver.execute("INSERT INTO child VALUES(1),(2),(3) RETURNING p", maxRows: 1)
+            }
+            let count = try await driver.execute("SELECT count(*) FROM child", maxRows: 0)
+            #expect(count.rows == [["0"]])
+            await driver.close()
+        }
+    }
+
+    @Test func truncatedReturningCommitsEveryRow() async throws {
+        try await withDatabase { driver, _ in
+            _ = try await driver.execute("CREATE TABLE t(v INTEGER)", maxRows: 0)
+            let result = try await driver.execute("INSERT INTO t VALUES(1),(2),(3) RETURNING v", maxRows: 1)
+            #expect(result.rows == [["1"]])
+            #expect(result.truncated)
+            let count = try await driver.execute("SELECT count(*) FROM t", maxRows: 0)
+            #expect(count.rows == [["3"]])
+            // A read still stops at the limit.
+            let read = try await driver.execute("SELECT v FROM t ORDER BY v", maxRows: 2)
+            #expect(read.rows == [["1"], ["2"]])
+            #expect(read.truncated)
+            await driver.close()
+        }
+    }
+
     // MARK: Helpers
 
     private static func tempPath() -> String {

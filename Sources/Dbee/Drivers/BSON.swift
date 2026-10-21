@@ -33,12 +33,13 @@ indirect enum BSONValue: Equatable, Sendable {
         return nil
     }
 
-    /// Any numeric value as an Int.
+    /// Any numeric value that is a whole number Int can hold, as an Int. A fractional or out-of-range
+    /// double is nil rather than truncated or trapping.
     var int: Int? {
         switch self {
         case .int32(let value): Int(value)
         case .int64(let value): Int(value)
-        case .double(let value) where value.isFinite: Int(value)
+        case .double(let value): Int(exactly: value)
         default: nil
         }
     }
@@ -46,7 +47,8 @@ indirect enum BSONValue: Equatable, Sendable {
     var bool: Bool? {
         switch self {
         case .bool(let value): value
-        case .int32, .int64, .double: int.map { $0 != 0 }
+        case .int32, .int64: int.map { $0 != 0 }
+        case .double(let value): value != 0
         default: nil
         }
     }
@@ -447,13 +449,15 @@ enum Decimal128 {
         if let dot = s.firstIndex(of: ".") {
             let fraction = s[s.index(after: dot)...]
             digits = String(s[..<dot]) + fraction
-            exponent -= fraction.count
+            let (adjusted, overflow) = exponent.subtractingReportingOverflow(fraction.count)
+            guard !overflow else { return nil }
+            exponent = adjusted
         } else {
             digits = String(s)
         }
         guard !digits.isEmpty, digits.allSatisfy(\.isASCII), digits.allSatisfy(\.isNumber), digits.count <= 34 else { return nil }
-        let biased = exponent + 6176
-        guard (0...0x2FFF).contains(biased) else { return nil }
+        let (biased, overflow) = exponent.addingReportingOverflow(6176)
+        guard !overflow, (0...0x2FFF).contains(biased) else { return nil }
         // Coefficient as a 128-bit number.
         var high: UInt64 = 0
         var low: UInt64 = 0
